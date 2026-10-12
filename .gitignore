@@ -1,0 +1,7 @@
+AutobuildGithubKey-*.txt
+*.key
+.env
+.env.*
+AutobuildData*.json*
+AutobuildStudioHistory*.json
+plan-*.json
