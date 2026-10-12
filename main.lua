@@ -1463,7 +1463,9 @@ function P.prepare(targets,world,options)
 		end
 		table.sort(list,function(a,b) return a.operations<b.operations end)
 		recipes[i]=list lowerCosts[i]=bestCost
-		if i%8==0 or i==#targets then checkpoint("Анализ способов: "..i.."/"..#targets,.45*i/#targets) end
+		if i%8==0 or i==#targets then
+			if options.visual then options.visual("analysis",targets,i) end
+			checkpoint("Анализ способов: "..i.."/"..#targets,.45*i/#targets) end
 	end
 	local futureSavings={} local outgoing={}
 	for j,list in ipairs(recipes) do
@@ -1543,7 +1545,9 @@ function P.prepare(targets,world,options)
 			end
 			if best.kind=="reuse" and best.source.id~=target.id then available[best.source.id]=false end
 			obstacles[#obstacles+1]=target position=target.pos
-			if step%8==0 or step==#targets then checkpoint(name..": "..step.."/"..#targets,.45+.55*(planNumber-1+step/#targets)/3) end
+			if step%8==0 or step==#targets then
+				if options.visual then options.visual("candidate",plan,step) end
+				checkpoint(name..": "..step.."/"..#targets,.45+.55*(planNumber-1+step/#targets)/3) end
 		end
 		return plan
 	end
@@ -1583,8 +1587,36 @@ function P.chooseLive(target,sources,obstacles,allTargets,bridges,partial)
 	end
 	return nil
 end
-return P
+-- Reusable plans provide an ordering template. Every recipe is compiled anew
+-- against the current scene, dimensions, properties and future target volumes.
+function P.prepareOrdered(targets,scene,options,order)
+	options=options or {}
+	for i,target in ipairs(targets) do
+		local faces={}
+		for _,spray in ipairs(target.sprays) do if faces[spray.face] then error("Блок "..i..": несколько надписей на одной грани",0) end faces[spray.face]=true end
+		if #P.baselines(target)==0 then error("Блок "..i..": границы не совместимы с целыми шагами граней",0) end
+	end
+	local sources,obstacles={},table.clone(scene)
+	for _,m in ipairs(scene) do if m.eligible then sources[#sources+1]=m end end
+	local plan={name="Пользовательский маршрут",items={},operations=0,shapeSteps=0,helpers=0,score=0,alternatives={}}
+	local seen={}
+	for rank,index in ipairs(order) do
+		if options.cancelled and options.cancelled() then error("Подготовка остановлена",0) end
+		local target=targets[index]
+		if not target or seen[index] then error("Неверный порядок шаблона",0) end
+		local recipe=P.chooseLive(target,sources,obstacles,targets,options.bridges==true)
+		if not recipe then error("Порядок шаблона закрывает безопасный путь блока "..index,0) end
+		recipe.index=index seen[index]=true plan.items[#plan.items+1]=recipe
+		plan.operations+=recipe.operations plan.shapeSteps+=recipe.shapeSteps plan.helpers+=#recipe.helpers
+		obstacles[#obstacles+1]=target sources[#sources+1]=target
+		if options.visual and (rank%8==0 or rank==#order) then options.visual("template",plan,rank) end
+		if options.progress and (rank%8==0 or rank==#order) then options.progress("Адаптация маршрута: "..rank.."/"..#targets,rank/#targets) end
+	end
+	if #order~=#targets then error("Шаблон не охватывает все цели",0) end
+	return plan
+end
 
+return P
 end)()
 -- A build request is never retried automatically: the server has no request IDs.
 local positionLock, positionPhysics, noclipConnection, toolEquipConnection
@@ -1804,48 +1836,95 @@ local function refreshPlanProgress(session)
 	end
 	for index in pairs(session.visiblePlanIndices or {}) do markPlanProgress(session,index) end
 end
-local function drawPreparedPlan(session)
-	if unloaded then return end
-	-- Reuse the same drawings when resuming. A hidden/destroyed preview is rebuilt.
-	if session.renderedText==session.text and session.renderedOffset==session.offset and visualFolder and visualFolder:FindFirstChild("Plan_Start") then return end
-	if not visualFolder then showVisuals() end
-	clearPlanPreview()
-	if not visualFolder then return end
-	local colors={route=Color3.fromRGB(92,178,255),source=Color3.fromRGB(105,233,161),helper=Color3.fromRGB(255,184,82)}
+-- Planning callbacks contain actual examined targets and accepted safe recipes.
+local PlanDrawing=(function()
+	local D={}
+	local route=Color3.fromRGB(92,178,255)
+	local copy=Color3.fromRGB(105,233,161)
+	local helper=Color3.fromRGB(255,184,82)
 	local function segment(a,b,color,name,width)
 		local length=(b-a).Magnitude
 		if length<.01 then return end
 		create("Part",{Name="Plan_"..name,Parent=visualFolder,Anchored=true,CanCollide=false,CanQuery=false,CanTouch=false,Size=Vector3.new(width,width,length),CFrame=CFrame.lookAt((a+b)/2,b),Material=Enum.Material.Neon,Color=color,Transparency=.3})
 	end
-	local function cross(point,color,name)
-		segment(point-Vector3.new(.7,0,.7),point+Vector3.new(.7,0,.7),color,name.."_a",.08)
-		segment(point-Vector3.new(.7,0,-.7),point+Vector3.new(.7,0,-.7),color,name.."_b",.08)
+	local function arrow(a,b,color,name,width)
+		segment(a,b,color,name,width)
+		local delta=b-a local length=delta.Magnitude
+		if length<.15 then return end
+		local direction=delta/length
+		local side=direction:Cross(Vector3.new(0,1,0))
+		if side.Magnitude<.01 then side=direction:Cross(Vector3.new(1,0,0)) end
+		side=side/side.Magnitude
+		local scale=math.min(1.1,length*.28)
+		segment(b,b-direction*scale+side*scale*.45,color,name.."_ArrowL",width)
+		segment(b,b-direction*scale-side*scale*.45,color,name.."_ArrowR",width)
 	end
-	local previous
-	session.visiblePlanIndices={}
-	-- A bounded moving window avoids thousands of UI objects or line segments.
-	local first=session.routeWindowStart or 1
-	local last=math.min(#session.plan.items,first+191)
-	for rank=first,last do
-		local item=session.plan.items[rank]
-		session.visiblePlanIndices[item.index]=true
+	local function outline(m,name,color)
+		local p=create("Part",{Name="Plan_"..name,Parent=visualFolder,Size=m.size,Position=m.pos,Anchored=true,CanCollide=false,CanQuery=false,CanTouch=false,Transparency=1})
+		create("SelectionBox",{Name="StateOutline",Parent=p,Adornee=p,Color3=color,LineThickness=.02,SurfaceTransparency=1})
+		return p
+	end
+	function D.item(session,item,rank,previous,first)
 		local target=session.models[item.index]
 		local point=target.pos+Vector3.new(0,target.size.Y/2+.7,0)
-		if previous then segment(previous,point,colors.route,"Route_"..rank,.06) end
-		if rank==first then
-			create("Part",{Name="Plan_Start",Parent=visualFolder,Anchored=true,CanCollide=false,CanTouch=false,CanQuery=false,Shape=Enum.PartType.Ball,Size=Vector3.new(.55,.55,.55),Position=point,Material=Enum.Material.Neon,Color=colors.route,Transparency=.2})
-		end
-		if item.source then segment(item.source.pos,target.pos,colors.source,"Source_"..rank,.03) end
+		if previous then arrow(previous,point,route,"Route_"..rank,.06) end
+		if first then create("Part",{Name="Plan_Start",Parent=visualFolder,Anchored=true,CanCollide=false,CanTouch=false,CanQuery=false,Shape=Enum.PartType.Ball,Size=Vector3.new(.55,.55,.55),Position=point,Material=Enum.Material.Neon,Color=route,Transparency=.2}) end
+		if item.source then arrow(item.source.pos,target.pos,copy,"Source_"..rank,.03) end
 		for n,h in ipairs(item.helpers or {}) do
-			local ghost=create("Part",{Name="Plan_Helper_"..rank.."_"..n,Parent=visualFolder,Anchored=true,CanCollide=false,CanQuery=false,CanTouch=false,Size=h.size,CFrame=CFrame.new(h.pos),Transparency=1})
-			create("SelectionBox",{Name="Plan_HelperOutline",Parent=ghost,Adornee=ghost,Color3=colors.helper,LineThickness=.035,SurfaceTransparency=1})
-			cross(h.pos+Vector3.new(0,h.size.Y/2+.7,0),colors.helper,"HelperMark_"..rank.."_"..n)
+			outline(h,"Helper_"..rank.."_"..n,helper)
+			local p=h.pos+Vector3.new(0,h.size.Y/2+.7,0)
+			segment(p-Vector3.new(.7,0,.7),p+Vector3.new(.7,0,.7),helper,"HelperMark_"..rank.."_"..n.."_a",.08)
+			segment(p-Vector3.new(.7,0,-.7),p+Vector3.new(.7,0,-.7),helper,"HelperMark_"..rank.."_"..n.."_b",.08)
 		end
-		previous=point
+		session.visiblePlanIndices[item.index]=true
+		return point
+	end
+	function D.reset(session,key)
+		if not visualFolder then showVisuals() end
+		clearPlanPreview()
+		session.drawingKey=key session.drawingCount=0 session.drawingPrevious=nil
+		session.visiblePlanIndices={} session.renderedText=nil
+	end
+	function D.progress(session,phase,payload,count)
+		if unloaded or cancelled() then return end
+		if phase=="analysis" then
+			D.reset(session,"analysis")
+			if not visualFolder then return end
+			-- Only the most recently examined eight blocks are highlighted.
+			for i=math.max(1,count-7),count do outline(session.models[i],"Examining_"..i,copy) end
+			return
+		end
+		local key=phase..":"..tostring(payload.name)
+		local first=session.drawingKey==key and (session.drawingFirst or 1) or 1
+		if count>first+191 then first=math.max(1,count-159) end
+		if session.drawingKey~=key or count<(session.drawingCount or 0) or first~=(session.drawingFirst or 1) then
+			D.reset(session,key) session.drawingFirst=first session.drawingCount=first-1
+		end
+		if not visualFolder then return end
+		for rank=(session.drawingCount or 0)+1,count do
+			local item=payload.items[rank]
+			session.drawingPrevious=D.item(session,item,rank,session.drawingPrevious,rank==first)
+			markPlanProgress(session,item.index)
+		end
+		session.drawingCount=count
+	end
+	return D
+end)()
+local function drawPreparedPlan(session)
+	if unloaded then return end
+	if session.renderedText==session.text and session.renderedOffset==session.offset and visualFolder and visualFolder:FindFirstChild("Plan_Start") then return end
+	PlanDrawing.reset(session,"final")
+	if not visualFolder then return end
+	local first=session.routeWindowStart or 1
+	local previous
+	for rank=first,math.min(#session.plan.items,first+191) do
+		local item=session.plan.items[rank]
+		previous=PlanDrawing.item(session,item,rank,previous,rank==first)
 		markPlanProgress(session,item.index)
 	end
 	session.renderedOffset=session.offset session.renderedText=session.text session.previewInvalid=false
 end
+
 local function advancePlanPreview(session,rank)
 	if rank>=(session.routeWindowStart or 1)+160 and rank<#session.plan.items then
 		session.routeWindowStart=rank session.renderedText=nil
@@ -2616,7 +2695,7 @@ local function runBuilderEngine(buildString,offset,prepareOnly)
 		local started=os.clock()
 		btnStart.Text="ГОТОВЛЮ ПЛАН"
 		local cached=loadPreparedPlan(session,scene,findTool("Delete")~=nil)
-		session.plan=cached or PlanLibrary.prepare(session.models,scene,{bridges=findTool("Delete")~=nil,position=root and root.Position or session.models[1].pos,cancelled=cancelled,progress=function(text,fraction)
+		session.plan=cached or PlanLibrary.prepare(session.models,scene,{bridges=findTool("Delete")~=nil,position=root and root.Position or session.models[1].pos,cancelled=cancelled,visual=function(phase,payload,count) PlanDrawing.progress(session,phase,payload,count) end,progress=function(text,fraction)
 			setStatus(string.format("Подготовка %d%% · %s",math.round(fraction*100),text))
 			statDisplay.Text="Подготовка · "..#session.blocks.." блоков"
 			task.wait()

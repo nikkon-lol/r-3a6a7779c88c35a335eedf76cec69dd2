@@ -19,3 +19,11 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/nikkon-lol/r-3a6a7779
 ```
 
 Тест сам не строит и не проигрывает анимации. Возьми настоящий Build, постой с ним, поставь 3–5 блоков вручную, затем нажми «Завершить и скопировать». Отчёт также сохраняется в `Autobuild-animation-report.txt`.
+
+Для проверки земли и наблюдения за ручной работой лопатой:
+
+```lua
+loadstring(game:HttpGet("https://raw.githubusercontent.com/nikkon-lol/r-3a6a7779c88c35a335eedf76cec69dd2/main/shovel-probe.lua"))()
+```
+
+Порядок тестов — [SHOVEL-TEST.md](SHOVEL-TEST.md). Наблюдатель сам не копает и не отправляет команды. Автоматические действия лопатой ещё не включены. План строительства теперь отрисовывается стрелками во время самого расчёта.
