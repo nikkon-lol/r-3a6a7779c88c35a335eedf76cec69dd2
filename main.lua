@@ -93,7 +93,7 @@ local C_DARK_GREEN = Color3.fromRGB(0, 80, 35)
 local C_RED = Color3.fromRGB(255, 60, 70)
 local C_DARK_RED = Color3.fromRGB(110, 25, 30)
 local C_WHITE = Color3.fromRGB(245, 245, 245)
-local FONT_BOLD = Font.new([[rbxasset://fonts/families/Montserrat.json]], Enum.FontWeight.Bold, Enum.FontStyle.Normal)
+local FONT_BOLD = Font.new([[rbxasset://fonts/families/Montserrat.json]], Enum.FontWeight.Medium, Enum.FontStyle.Normal)
 
 local function create(className, properties)
 	local instance = Instance.new(className)
@@ -123,9 +123,9 @@ local gui = create("ScreenGui", {
 local parentSuccess = pcall(function() gui.Parent = CoreGui end)
 if not parentSuccess then gui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
 
-local normalSize = UDim2.new(0, 800, 0, 610)
-local fullSize = UDim2.new(0, 1040, 0, 720)
-local minimizedSize = UDim2.new(0, 800, 0, 44)
+local normalSize = UDim2.new(0, 820, 0, 560)
+local fullSize = UDim2.new(0, 1200, 0, 760)
+local minimizedSize = UDim2.new(0, normalSize.X.Offset, 0, 46)
 local isMinimized = false
 local isMaximized = false
 
@@ -227,15 +227,7 @@ local function createHeaderBtn(symbol, defaultColor, strokeColor, hoverBg)
 	})
 	addCorner(btn, 6)
 	local stroke = addStroke(btn, 1, strokeColor or C_DARK_GREEN)
-	
-	btn.MouseEnter:Connect(function()
-		TweenService:Create(btn, TweenInfo.new(0.2), {BackgroundColor3 = hoverBg or C_LIGHT_GRAY, TextColor3 = C_WHITE}):Play()
-		TweenService:Create(stroke, TweenInfo.new(0.2), {Color = defaultColor or C_GREEN}):Play()
-	end)
-	btn.MouseLeave:Connect(function()
-		TweenService:Create(btn, TweenInfo.new(0.2), {BackgroundColor3 = C_GRAY, TextColor3 = defaultColor or C_GREEN}):Play()
-		TweenService:Create(stroke, TweenInfo.new(0.2), {Color = strokeColor or C_DARK_GREEN}):Play()
-	end)
+
 	return btn
 end
 
@@ -369,6 +361,7 @@ local function setEditorDisplay(value)
 	updatingEditor = true
 	editorDisplayText = value
 	textBox.Text = value
+	if StudioHooks.editor then StudioHooks.editor(value) end
 	updatingEditor = false
 end
 
@@ -378,7 +371,8 @@ local function setBuildContent(value, keepRotationPivot)
 	tabsData[activeTabIndex].content = value
 	if StudioHooks.content then StudioHooks.content(value) end
 	invalidatePreparedPlan()
-	setEditorDisplay(#value <= 60000 and value or ("[Loaded " .. #value .. " characters; COPY exports the full build]"))
+	local displayValue=value:gsub("%|%|","|\n|")
+	setEditorDisplay(#value <= 60000 and displayValue or ("[Loaded " .. #value .. " characters; COPY exports the full build]"))
 	saveData()
 end
 
@@ -416,15 +410,7 @@ local function createActionButton(name, text, height, order)
 	})
 	addCorner(btn, 6)
 	local stroke = addStroke(btn, 1, C_DARK_GREEN)
-	
-	btn.MouseEnter:Connect(function()
-		TweenService:Create(btn, TweenInfo.new(0.2), {BackgroundColor3 = C_LIGHT_GRAY}):Play()
-		TweenService:Create(stroke, TweenInfo.new(0.2), {Color = C_GREEN}):Play()
-	end)
-	btn.MouseLeave:Connect(function()
-		TweenService:Create(btn, TweenInfo.new(0.2), {BackgroundColor3 = C_GRAY}):Play()
-		TweenService:Create(stroke, TweenInfo.new(0.2), {Color = C_DARK_GREEN}):Play()
-	end)
+
 	return btn, stroke
 end
 
@@ -486,6 +472,7 @@ local function setStatus(message, failure)
 	statusLabel.Text=message
 	statusLabel.TextColor3=failure and C_RED or C_WHITE
 	diagnosticLog[#diagnosticLog+1]=os.date("%H:%M:%S").." "..message
+	if StudioHooks.status then StudioHooks.status() end
 	if #diagnosticLog>100 then table.remove(diagnosticLog,1) end
 	if failure then warn("AUTOBUILD: "..message) end
 end
@@ -524,7 +511,7 @@ local function updateDefaultStats()
 end
 
 btnLog.MouseButton1Click:Connect(function()
-	local text="Autobuild Studio v4\n"..table.concat(diagnosticLog,"\n")
+	local text="Autobuild Studio v5 / ORBIT\n"..table.concat(diagnosticLog,"\n")
 	if storageError then text=text.."\nStorage: "..storageError end
 	if copyText(text) then setStatus("Диагностика скопирована") else setStatus("Буфер обмена недоступен",true) end
 end)
@@ -534,18 +521,19 @@ local tabElements = {}
 local function renderTabs()
 	for _, v in ipairs(tabElements) do v:Destroy() end
 	tabElements = {}
-	
+
 	for i, tab in ipairs(tabsData) do
 		local isCurrent = (i == activeTabIndex)
 		local tFrame = create("Frame", {
 			Parent = tabScroll,
-			Size = UDim2.new(0, 115, 1, -6),
+			Size = UDim2.new(0, 148, 1, -2),
 			BackgroundColor3 = isCurrent and C_BLACK or C_GRAY,
 			LayoutOrder = i
 		})
 		addCorner(tFrame, 6)
-		local stroke = addStroke(tFrame, 1, isCurrent and C_GREEN or C_DARK_GREEN)
-		
+		local stroke = addStroke(tFrame, 1, C_DARK_GREEN)
+		if isCurrent then create("Frame",{Parent=tFrame,Position=UDim2.new(0,0,1,-2),Size=UDim2.new(1,0,0,2),BackgroundColor3=C_GREEN,BorderSizePixel=0}) end
+
 		local tBtn = create("TextButton", {
 			Parent = tFrame,
 			Size = UDim2.new(1, -20, 1, 0),
@@ -556,25 +544,25 @@ local function renderTabs()
 			TextSize = 11,
 			TextTruncate = Enum.TextTruncate.AtEnd
 		})
-		
+
 		local delBtn = create("TextButton", {
 			Parent = tFrame,
 			Size = UDim2.new(0, 16, 0, 16),
 			Position = UDim2.new(1, -18, 0.5, -8),
 			BackgroundTransparency = 1,
-			Text = "✕",
+			Text = "×",
 			TextColor3 = isCurrent and C_GREEN or Color3.fromRGB(150, 150, 150),
 			FontFace = FONT_BOLD,
 			TextSize = 10
 		})
-		
+
 		tBtn.MouseButton1Click:Connect(function()
 			if _G.autobuildRunning or busySaving then return end
 	activeTabIndex = i
 			setBuildContent(tab.content)
 			renderTabs()
 		end)
-		
+
 		tBtn.MouseButton2Click:Connect(function()
 			if _G.autobuildRunning or busySaving then return end
 			local rename=create("TextBox",{Parent=tFrame,Size=UDim2.new(1,-20,1,0),BackgroundColor3=C_GRAY,Text=tab.name,TextColor3=C_WHITE,FontFace=FONT_BOLD,TextSize=11,ClearTextOnFocus=false,ZIndex=5})
@@ -600,10 +588,10 @@ local function renderTabs()
 			saveData()
 			renderTabs()
 		end)
-		
+
 		table.insert(tabElements, tFrame)
 	end
-	tabScroll.CanvasSize = UDim2.new(0, #tabsData * 123 + 6, 0, 0)
+	tabScroll.CanvasSize = UDim2.new(0, #tabsData * 156 + 6, 0, 0)
 end
 
 addTabBtn.MouseButton1Click:Connect(function()
@@ -627,19 +615,9 @@ textBox:GetPropertyChangedSignal("Text"):Connect(function()
 	saveRevision = saveRevision + 1
 	local revision = saveRevision
 	task.delay(.4, function() if not unloaded and revision == saveRevision then saveData() end end)
-	
-	local params = Instance.new("GetTextBoundsParams")
-	params.Text = textBox.Text == "" and "A" or textBox.Text
-	params.Font = FONT_BOLD
-	params.Size = 12
-	params.Width = textScroll.AbsoluteSize.X > 0 and textScroll.AbsoluteSize.X or 300
-	
-	local success, result = pcall(function() return TextService:GetTextBoundsAsync(params) end)
-	if success then
-		textScroll.CanvasSize = UDim2.new(0, 0, 0, math.max(result.Y + 15, editorFrame.AbsoluteSize.Y - 10))
-		textBox.Size = UDim2.new(1, 0, 0, math.max(result.Y + 15, editorFrame.AbsoluteSize.Y - 10))
-	end
-	
+
+	if StudioHooks.editor then StudioHooks.editor(textBox.Text) end
+
 	if not _G.autobuildRunning then updateDefaultStats() end
 end)
 
@@ -2031,6 +2009,243 @@ local function loadPreparedPlan(session,scene,bridges)
 	return nil
 end
 
+local PlanLibrary=(function()
+local PlanLibrary={}
+local indexFile="AutobuildPlanLibrary.json"
+local rows,memory,choices={},{},{}
+local function safeFile(name)
+	return type(name)=="string" and #name<=220 and not name:find('[%c/\\<>:"|?*]') and name:sub(-5)==".plan" and not name:find("^%.")
+end
+local function cleanName()
+	local name=tabsData[activeTabIndex].name:gsub('[%c<>:"/\\|?*]',"_"):gsub("[%s%.]+$",""):gsub("^%.*","")
+	if name=="" then name="Build" end
+	local stem=name:match("^[^%.]+") or name
+	if ({CON=true,PRN=true,AUX=true,NUL=true})[stem:upper()] or stem:upper():match("^COM[1-9]$") or stem:upper():match("^LPT[1-9]$") then name="Build_"..name end
+	local cut=utf8.offset(name,65) if cut then name=name:sub(1,cut-1) end
+	return name
+end
+local function validStored(s)
+	if not (type(s)=="table" and s.version==4 and type(s.text)=="string" and type(s.items)=="table" and #s.items>0 and type(s.offset)=="table" and readPlanVector(s.offset)~=nil and type(s.name)=="string") then return false end
+	for _,item in ipairs(s.items) do if type(item)~="table" or type(item.index)~="number" or item.index%1~=0 or item.index<1 then return false end end
+	if s.models~=nil then
+		if type(s.models)~="table" or #s.models~=#s.items then return false end
+		for _,m in ipairs(s.models) do
+			if type(m)~="table" then return false end
+			local p,size=readPlanVector(m.pos),readPlanVector(m.size)
+			if not p or not size or size.X<1 or size.Y<1 or size.Z<1 then return false end
+		end
+	end
+	return true
+end
+local function readStored(file)
+	if not safeFile(file) then return nil end
+	if memory[file] then return memory[file] end
+	if not readfile then return nil end
+	local ok,data=pcall(function() return HttpService:JSONDecode(readfile(file)) end)
+	if ok and validStored(data) then memory[file]=data return data end
+	return nil
+end
+local function persistIndex()
+	if writefile then pcall(function() writefile(indexFile,HttpService:JSONEncode({version=1,plans=rows,choices=choices})) end) end
+end
+if isfile and readfile then
+	pcall(function()
+		if not isfile(indexFile) then return end
+		local index=HttpService:JSONDecode(readfile(indexFile))
+		if type(index)~="table" or index.version~=1 then return end
+		if type(index.plans)=="table" then
+			for _,r in ipairs(index.plans) do if type(r)=="table" and safeFile(r.file) and type(r.buildName)=="string" and (r.createdAt==nil or type(r.createdAt)=="number" and r.createdAt==r.createdAt) then rows[#rows+1]=r end end
+		end
+		if type(index.choices)=="table" then for name,file in pairs(index.choices) do if type(name)=="string" and (file=="auto" or safeFile(file)) then choices[name]=file end end end
+	end)
+end
+local function meta(file,s)
+	local points={}
+	local models=s.models or {}
+	local step=math.max(1,math.ceil(#s.items/28))
+	for i=1,#s.items,step do local m=models[s.items[i].index] if m and readPlanVector(m.pos) then points[#points+1]=m.pos end end
+	return {file=file,buildName=s.buildName or file:sub(1,-6),createdAt=s.createdAt or 0,count=#s.items,operations=s.operations or 0,shapeSteps=s.shapeSteps or 0,helpers=s.helpers or 0,points=points,parentPlan=s.requestedTemplate~="auto" and s.requestedTemplate or nil}
+end
+local function add(file,s)
+	if not validStored(s) then return end
+	if not s.models then
+		local blocks,invalid=parseBlocks(s.text,readPlanVector(s.offset))
+		if invalid>0 or #blocks~=#s.items then return end
+		s.models={} for i,b in ipairs(blocks) do s.models[i]={pos=planVector(b.centerPos),size=planVector(b.size)} end
+	end
+	memory[file]=s
+	for _,r in ipairs(rows) do if r.file==file then return end end
+	rows[#rows+1]=meta(file,s)
+end
+local function reserveName(base)
+	local suffix=0
+	while true do
+		local file=(suffix==0 and "" or "("..suffix..")")..base..".plan"
+		local exists=memory[file]~=nil
+		for _,r in ipairs(rows) do if r.file==file then exists=true break end end
+		if isfile then local ok,value=pcall(isfile,file) exists=exists or ok and value end
+		if not exists then return file end
+		suffix+=1
+	end
+end
+function PlanLibrary.list()
+	local result={} for _,r in ipairs(rows) do result[#result+1]=r end
+	table.sort(result,function(a,b) if (a.createdAt or 0)==(b.createdAt or 0) then return a.file>b.file end return (a.createdAt or 0)>(b.createdAt or 0) end)
+	return result
+end
+function PlanLibrary.selection() return choices[tabsData[activeTabIndex].name] or "auto" end
+function PlanLibrary.select(file)
+	if _G.autobuildRunning or _G.autobuildPreparing then return false,"Останови строительство перед сменой плана" end
+	if file==PlanLibrary.selection() then return true end
+	if file~="auto" and not readStored(file) then return false,"Файл плана не читается" end
+	if resumeSession then
+		for _,b in ipairs(resumeSession.blocks or {}) do
+			if b.creation or b.pendingResize or b.pendingCollision then return false,"Сначала продолжи и подтверди отправленные команды" end
+			for _,h in ipairs(b.work and b.work.helpers or {}) do if h.creation or h.brick and h.brick.Parent then return false,"Сначала заверши текущие вспомогательные блоки" end end
+		end
+		resumeSession.plan=nil resumeSession.planByIndex=nil resumeSession.previewInvalid=true resumeSession.renderedText=nil
+		clearPlanPreview()
+	end
+	choices[tabsData[activeTabIndex].name]=file persistIndex()
+	return true
+end
+function PlanLibrary.scan()
+	if not listfiles then return end
+	local ok,files=pcall(listfiles,"") if not ok or type(files)~="table" then return end
+	local seen={} for _,r in ipairs(rows) do seen[r.file]=true end
+	for i,path in ipairs(files) do
+		local file=type(path)=="string" and path:match("([^/\\]+)$") or nil
+		if file and safeFile(file) and not seen[file] then local s=readStored(file) if s then add(file,s) seen[file]=true end end
+		if i%40==0 then task.wait() if unloaded then return end end
+	end
+	persistIndex()
+end
+local function pack(session,scene,bridges)
+	local p=session.plan local clearance=planClearance(session)
+	local s={version=4,libraryVersion=1,planner="bounds-v3-studio-2",buildName=tabsData[activeTabIndex].name,createdAt=os.time(),requestedTemplate=PlanLibrary.selection(),text=session.text,offset=planVector(session.offset),world=planWorldKey(scene,clearance),clearance={pos=planVector(clearance.pos),size=planVector(clearance.size)},bridges=bridges,name=p.name,operations=p.operations,shapeSteps=p.shapeSteps,helpers=p.helpers,items={},models={}}
+	for i,m in ipairs(session.models) do s.models[i]={pos=planVector(m.pos),size=planVector(m.size)} end
+	for _,item in ipairs(p.items) do
+		local entry={index=item.index,kind=item.kind,operations=item.operations,shapeSteps=item.shapeSteps,helpers={}}
+		if item.source then entry.source={id=item.source.id,external=item.source.external==true,key=item.source.external and planModelKey(item.source) or nil} end
+		for _,h in ipairs(item.helpers or {}) do entry.helpers[#entry.helpers+1]={pos=planVector(h.pos),size=planVector(h.size)} end
+		s.items[#s.items+1]=entry
+	end
+	return s
+end
+savePreparedPlan=function(session,scene,bridges)
+	local s=pack(session,scene,bridges)
+	local file=reserveName(cleanName())
+	local saved=false
+	if writefile then saved=pcall(function() writefile(file,HttpService:JSONEncode(s)) end) end
+	add(file,s) persistIndex() session.planFile=file
+	setStatus(saved and "Сохранён план: "..file or "План в памяти: "..file.."; запись файла недоступна",not saved)
+	return saved
+end
+-- Preserve the original exact-cache validator, including source dependencies,
+-- the current clearance envelope and actual world properties.
+local exactReader=loadPreparedPlan
+local exactTarget=nil
+local legacyFile=planFileName
+planFileName=function() return exactTarget or legacyFile() end
+loadPreparedPlan=function(session,scene,bridges)
+	local selected=PlanLibrary.selection()
+	local candidates={}
+	if selected~="auto" then candidates[#candidates+1]=selected end
+	for _,r in ipairs(PlanLibrary.list()) do if r.buildName==tabsData[activeTabIndex].name and r.file~=selected then candidates[#candidates+1]=r.file end end
+	for _,file in ipairs(candidates) do
+		local s=readStored(file)
+		if s and (s.requestedTemplate or "auto")==selected then
+			exactTarget=file
+			local plan=exactReader(session,scene,bridges)
+			exactTarget=nil
+			if plan then return plan end
+		end
+	end
+	if #candidates==0 and selected=="auto" then
+		local previous=legacyFile()
+		local ok,s=pcall(function() return readfile and HttpService:JSONDecode(readfile(previous)) end)
+		if ok and validStored(s) then
+			local plan=exactReader(session,scene,bridges)
+			if plan then session.plan=plan savePreparedPlan(session,scene,bridges) return plan end
+		end
+	end
+	return nil
+end
+local function bounds(models)
+	local lo,hi=Vector3.new(math.huge,math.huge,math.huge),Vector3.new(-math.huge,-math.huge,-math.huge)
+	for _,m in ipairs(models) do
+		local p=m.pos
+		lo=Vector3.new(math.min(lo.X,p.X),math.min(lo.Y,p.Y),math.min(lo.Z,p.Z)) hi=Vector3.new(math.max(hi.X,p.X),math.max(hi.Y,p.Y),math.max(hi.Z,p.Z))
+	end
+	return lo,hi-lo
+end
+local function geometrySignature(p,size)
+	return string.format("%.3f,%.3f,%.3f/%.3f,%.3f,%.3f",p.X,p.Y,p.Z,size.X,size.Y,size.Z)
+end
+function PlanLibrary.order(stored,targets)
+	local models={}
+	for _,m in ipairs(stored.models or {}) do
+		local p,size=readPlanVector(m.pos),readPlanVector(m.size)
+		if not p or not size then return nil end
+		models[#models+1]={pos=p,size=size}
+	end
+	if #models==0 then return nil end
+	local route,seen={},{}
+	for _,r in ipairs(stored.items) do
+		if type(r.index)~="number" or not models[r.index] or seen[r.index] then return nil end
+		seen[r.index]=true route[#route+1]=r.index
+	end
+	if #route~=#models then return nil end
+	local from,span=bounds(models) local to,newSpan=bounds(targets)
+	if #models==#targets then
+		local lookup,duplicate={},false
+		for i,m in ipairs(targets) do local key=geometrySignature(m.pos-to,m.size) if lookup[key] then duplicate=true end lookup[key]=i end
+		local exact={}
+		if not duplicate then
+			for _,index in ipairs(route) do local m=models[index] local target=lookup[geometrySignature(m.pos-from,m.size)] if not target then exact={} break end exact[#exact+1]=target end
+		end
+		if #exact==#targets then return exact,"Точное соответствие геометрии" end
+	end
+	local function normalized(p,base,size)
+		return {X=size.X>.001 and (p.X-base.X)/size.X or .5,Y=size.Y>.001 and (p.Y-base.Y)/size.Y or .5,Z=size.Z>.001 and (p.Z-base.Z)/size.Z or .5}
+	end
+	local samples={}
+	local step=math.max(1,math.ceil(#route/128))
+	for rank=1,#route,step do samples[#samples+1]=normalized(models[route[rank]].pos,from,span) end
+	local groups={} for i=1,#samples do groups[i]={} end
+	for i,m in ipairs(targets) do
+		local p=normalized(m.pos,to,newSpan) local best,distance=1,math.huge
+		for rank,s in ipairs(samples) do local d=(p.X-s.X)^2+(p.Y-s.Y)^2+(p.Z-s.Z)^2 if d<distance then distance=d best=rank end end
+		groups[best][#groups[best]+1]={index=i,distance=distance}
+	end
+	local order={}
+	for _,group in ipairs(groups) do
+		table.sort(group,function(a,b) if a.distance==b.distance then return a.index<b.index end return a.distance<b.distance end)
+		for _,r in ipairs(group) do order[#order+1]=r.index end
+	end
+	return order,"Маршрут адаптирован к другой геометрии"
+end
+function PlanLibrary.prepare(targets,scene,options)
+	local selected=PlanLibrary.selection()
+	if selected=="auto" then return Planner.prepare(targets,scene,options) end
+	local stored=readStored(selected)
+	local order,description
+	if stored then order,description=PlanLibrary.order(stored,targets) end
+	if not order then error("Выбранный шаблон плана повреждён; выбери Авто или другой план",0) end
+	setStatus("Применяю "..selected.." · "..description)
+	local ok,plan=pcall(Planner.prepareOrdered,targets,scene,options,order)
+	if not ok then
+		if options.cancelled and options.cancelled() then error("Подготовка остановлена",0) end
+		setStatus("Порядок шаблона небезопасен; ищу безопасный маршрут для текущей постройки")
+		plan=Planner.prepare(targets,scene,options)
+		plan.adaptation="Безопасный обход шаблона"
+	else plan.adaptation=description end
+	plan.name="По плану "..selected plan.appliedFrom=selected
+	return plan
+end
+
+return PlanLibrary
+end)()
 local function instanceModel(brick,id)
 	return {id=id,pos=brick.Position,size=brick.Size,color=brick.Color,material=brick.Material,collide=brick.CanCollide,sprays=readSprays(brick),instance=brick,eligible=true}
 end
@@ -2403,7 +2618,7 @@ local function runBuilderEngine(buildString,offset,prepareOnly)
 		local started=os.clock()
 		btnStart.Text="ГОТОВЛЮ ПЛАН"
 		local cached=loadPreparedPlan(session,scene,findTool("Delete")~=nil)
-		session.plan=cached or Planner.prepare(session.models,scene,{bridges=findTool("Delete")~=nil,position=root and root.Position or session.models[1].pos,cancelled=cancelled,progress=function(text,fraction)
+		session.plan=cached or PlanLibrary.prepare(session.models,scene,{bridges=findTool("Delete")~=nil,position=root and root.Position or session.models[1].pos,cancelled=cancelled,progress=function(text,fraction)
 			setStatus(string.format("Подготовка %d%% · %s",math.round(fraction*100),text))
 			statDisplay.Text="Подготовка · "..#session.blocks.." блоков"
 			task.wait()
@@ -2460,7 +2675,7 @@ local function launchAction(forcePreparation)
 		local ok,finished,message=pcall(runBuilderEngine,text,offset,prepareOnly)
 		unlockPosition() stopToolForcing() disableNoclip() isBuilding=false
 		if unloaded then return end
-		_G.autobuildRunning=false textBox.TextEditable=true btnStart.TextColor3=C_GREEN
+		_G.autobuildRunning=false textBox.TextEditable=true btnStart.TextColor3=C_WHITE
 		btnStart.Text=ok and finished and (prepareOnly and "СТРОИТЬ ПО ПЛАНУ" or "СТРОИТЬ") or "ПРОДОЛЖИТЬ"
 		if ok and finished and not prepareOnly then cleanupVisuals(true) end
 		setStatus(ok and message or tostring(finished),not ok or not finished and not _G.stopautobuild)
@@ -2638,188 +2853,545 @@ return H
 		baseline=current
 	end
 	StudioHooks.save=remember
-	local palette={}
-	local palettes={
-		load={base=Color3.fromRGB(250,247,235),panel=Color3.fromRGB(240,235,216),hover=Color3.fromRGB(231,222,194),accent=Color3.fromRGB(126,86,13),line=Color3.fromRGB(204,183,130),text=Color3.fromRGB(45,39,25)},
-		create={base=Color3.fromRGB(17,13,34),panel=Color3.fromRGB(31,24,54),hover=Color3.fromRGB(49,36,78),accent=Color3.fromRGB(202,163,255),line=Color3.fromRGB(91,64,137),text=Color3.fromRGB(241,233,255)}
-	}
-	local roles=setmetatable({},{__mode="k"})
-	local function style(object)
-		if not object:IsDescendantOf(gui) then return end
-		if object:GetAttribute("StudioFixedColor") then return end
-		if object:IsA("GuiObject") then
-			local r=roles[object]
-			if not r then
-				r={}
-				local c=object.BackgroundColor3
-				r.bg=(c==C_BLACK and "base") or (c==C_GRAY and "panel") or (c==C_LIGHT_GRAY and "hover")
-				if object:IsA("TextLabel") or object:IsA("TextButton") or object:IsA("TextBox") then
-					r.text=object.TextColor3==C_RED and "danger" or "text"
-				end
-				roles[object]=r
-			end
-			if r.bg then object.BackgroundColor3=palette[r.bg] end
-			if r.text then object.TextColor3=r.text=="danger" and C_RED or palette.text end
-			if object:IsA("TextBox") then object.PlaceholderColor3=palette.accent end
-			if object:IsA("ScrollingFrame") then object.ScrollBarImageColor3=palette.accent end
-		elseif object:IsA("UIStroke") then object.Color=palette.line object.Thickness=1 end
+	local View=(function()
+-- ORBIT: the window, navigation and inspector are rebuilt as one UI.
+local UI={}
+local Fonts={regular=Font.new("rbxasset://fonts/families/Montserrat.json",Enum.FontWeight.Regular,Enum.FontStyle.Normal),medium=Font.new("rbxasset://fonts/families/Montserrat.json",Enum.FontWeight.Medium,Enum.FontStyle.Normal),strong=Font.new("rbxasset://fonts/families/Montserrat.json",Enum.FontWeight.SemiBold,Enum.FontStyle.Normal),code=Font.new("rbxasset://fonts/families/Inconsolata.json",Enum.FontWeight.Regular,Enum.FontStyle.Normal)}
+local themes={
+	create={base=Color3.fromRGB(12,13,23),deep=Color3.fromRGB(15,17,29),panel=Color3.fromRGB(21,23,38),hover=Color3.fromRGB(31,32,51),accent=Color3.fromRGB(177,147,255),primary=Color3.fromRGB(116,78,222),soft=Color3.fromRGB(33,25,56),line=Color3.fromRGB(46,47,68),muted=Color3.fromRGB(128,134,161),text=Color3.fromRGB(237,239,251)},
+	load={base=Color3.fromRGB(12,13,23),deep=Color3.fromRGB(15,17,29),panel=Color3.fromRGB(21,23,38),hover=Color3.fromRGB(31,32,51),accent=Color3.fromRGB(239,205,146),primary=Color3.fromRGB(137,99,41),soft=Color3.fromRGB(25,24,45),line=Color3.fromRGB(46,47,68),muted=Color3.fromRGB(128,134,161),text=Color3.fromRGB(237,239,251)},
+}
+local palette=themes.create
+local roles=setmetatable({},{__mode="k"})
+local themedGradients={}
+local settings={stars=true,width=820,height=560}
+if isfile and readfile then pcall(function() if isfile("AutobuildAppearance.json") then local v=HttpService:JSONDecode(readfile("AutobuildAppearance.json")) if type(v)=="table" then
+	settings.stars=v.stars~=false
+	if type(v.width)=="number" and v.width==v.width then settings.width=math.clamp(v.width,740,1600) end
+	if type(v.height)=="number" and v.height==v.height then settings.height=math.clamp(v.height,520,1000) end
+end end end) end
+local function saveAppearance() if writefile then pcall(function() writefile("AutobuildAppearance.json",HttpService:JSONEncode(settings)) end) end end
+normalSize=UDim2.fromOffset(settings.width,settings.height)
+minimizedSize=UDim2.fromOffset(settings.width,46)
+if openTween then openTween:Cancel() end
+mainFrame.Size=normalSize bodyFrame.Visible=true
+local stars={}
+local function style(o)
+	if not o:IsDescendantOf(gui) or o:GetAttribute("StudioFixedColor") then return end
+	if o:IsA("GuiObject") then
+		o.BorderSizePixel=0
+		local r=roles[o]
+		if not r then
+			local c=o.BackgroundColor3
+			r={bg=c==C_BLACK and "base" or c==C_GRAY and "panel" or c==C_LIGHT_GRAY and "hover" or nil,text="text"}
+			roles[o]=r
+		end
+		local bg=o:GetAttribute("NovaBackground") or r.bg
+		if bg and palette[bg] then o.BackgroundColor3=palette[bg] end
+		if o:IsA("TextLabel") or o:IsA("TextButton") or o:IsA("TextBox") then
+			local role=o:GetAttribute("NovaText") or r.text
+			o.TextColor3=role=="white" and Color3.fromRGB(255,255,255) or palette[role] or palette.text
+			o.FontFace=Fonts[o:GetAttribute("NovaFont") or (o:IsA("TextButton") and "medium" or "regular")]
+		end
+		if o:IsA("TextBox") then o.PlaceholderColor3=palette.muted end
+		if o:IsA("ScrollingFrame") then o.ScrollBarImageColor3=palette.line end
+	elseif o:IsA("UIStroke") then o.Color=palette[o:GetAttribute("NovaStroke") or "line"] o.Thickness=1 end
+end
+local function skin(o,bg,text,font)
+	if bg then o:SetAttribute("NovaBackground",bg) end
+	if text then o:SetAttribute("NovaText",text) end
+	if font then o:SetAttribute("NovaFont",font) end
+	style(o) return o
+end
+local function corners(o,radius)
+	local found=o:FindFirstChildOfClass("UICorner")
+	if found then found.CornerRadius=UDim.new(0,radius) else addCorner(o,radius) end
+end
+local function stroke(o)
+	return o:FindFirstChildOfClass("UIStroke") or addStroke(o,1,palette.line)
+end
+local function label(parent,text,pos,size,fontSize,role,font)
+	local l=create("TextLabel",{Parent=parent,BackgroundTransparency=1,Position=pos,Size=size,Text=text,TextSize=fontSize or 12,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Center,TextColor3=C_WHITE,FontFace=Fonts.regular})
+	return skin(l,nil,role or "text",font or "regular")
+end
+local function button(parent,text,pos,size,bg)
+	local b=create("TextButton",{Parent=parent,Position=pos,Size=size,Text=text,TextSize=12,TextWrapped=false,BackgroundColor3=C_GRAY,TextColor3=C_WHITE,FontFace=Fonts.medium,AutoButtonColor=false})
+	corners(b,7) skin(b,bg or "panel",bg=="primary" and "white" or "text","medium")
+	if bg~="primary" then stroke(b) end
+	return b
+end
+local function field(parent,text,pos,size)
+	local f=create("TextBox",{Parent=parent,Text=text,Position=pos,Size=size,BackgroundColor3=C_BLACK,TextColor3=C_WHITE,ClearTextOnFocus=false,FontFace=Fonts.code,TextSize=13})
+	corners(f,6) stroke(f) return skin(f,"deep","text","code")
+end
+local function line(parent,a,b,color,width,z)
+	local delta=b-a
+	local o=create("Frame",{Parent=parent,AnchorPoint=Vector2.new(.5,.5),Position=UDim2.fromOffset((a.X+b.X)/2,(a.Y+b.Y)/2),Size=UDim2.fromOffset(delta.Magnitude,width or 1.5),Rotation=math.deg(math.atan2(delta.Y,delta.X)),BackgroundColor3=color,BorderSizePixel=0,ZIndex=z or 3})
+	o:SetAttribute("StudioFixedColor",true) return o
+end
+local function icon(parent,kind,pos,size,color)
+	local art=create("Frame",{Name="Icon_"..kind,Parent=parent,Position=pos,Size=UDim2.fromOffset(size,size),BackgroundTransparency=1})
+	local function edge(x1,y1,x2,y2) return line(art,Vector2.new(x1*size,y1*size),Vector2.new(x2*size,y2*size),color,1.5,parent.ZIndex or 3) end
+	if kind=="cube" then
+		for _,e in ipairs({{.5,.08,.9,.3},{.9,.3,.9,.72},{.9,.72,.5,.94},{.5,.94,.1,.72},{.1,.72,.1,.3},{.1,.3,.5,.08},{.1,.3,.5,.53},{.9,.3,.5,.53},{.5,.53,.5,.94}}) do edge(unpack(e)) end
+	elseif kind=="load" then
+		for _,e in ipairs({{.5,.1,.5,.66},{.3,.46,.5,.66},{.7,.46,.5,.66},{.12,.65,.12,.88},{.12,.88,.88,.88},{.88,.88,.88,.65}}) do edge(unpack(e)) end
+	elseif kind=="paint" then
+		edge(.2,.8,.64,.36) edge(.55,.15,.87,.47) edge(.55,.15,.34,.36) edge(.87,.47,.66,.68) edge(.34,.36,.66,.68)
+	elseif kind=="size" then
+		edge(.14,.5,.86,.5) edge(.14,.5,.32,.32) edge(.14,.5,.32,.68) edge(.86,.5,.68,.32) edge(.86,.5,.68,.68)
+	elseif kind=="delete" then
+		edge(.23,.27,.77,.27) edge(.32,.27,.36,.85) edge(.68,.27,.64,.85) edge(.36,.85,.64,.85) edge(.4,.14,.6,.14)
+	elseif kind=="select" then
+		for _,e in ipairs({{.15,.35,.15,.15},{.15,.15,.35,.15},{.65,.15,.85,.15},{.85,.15,.85,.35},{.15,.65,.15,.85},{.15,.85,.35,.85},{.65,.85,.85,.85},{.85,.85,.85,.65}}) do edge(unpack(e)) end
+	elseif kind=="settings" then
+		for i=1,3 do local y=i*.24 edge(.15,y,.85,y) edge(i==2 and .65 or .35,y-.1,i==2 and .65 or .35,y+.1) end
+	elseif kind=="undo" or kind=="redo" then
+		for _,e in ipairs({{.42,.18,.16,.4},{.16,.4,.42,.6},{.16,.4,.7,.4},{.7,.4,.84,.58},{.84,.58,.8,.75},{.8,.75,.64,.83}}) do
+			if kind=="redo" then e={1-e[1],e[2],1-e[3],e[4]} end edge(unpack(e))
+		end
+	elseif kind=="chevron" then edge(.2,.35,.5,.65) edge(.5,.65,.8,.35)
+	elseif kind=="orbit" then
+		for i=1,2 do
+			local ring=create("Frame",{Parent=art,AnchorPoint=Vector2.new(.5,.5),Position=UDim2.fromScale(.5,.5),Size=UDim2.fromOffset(size*.94,size*.48),Rotation=i==1 and 35 or -35,BackgroundTransparency=1})
+			corners(ring,size) local s=stroke(ring) s.Color=color s:SetAttribute("StudioFixedColor",true)
+		end
+		local dot=create("Frame",{Parent=art,Position=UDim2.fromScale(.41,.41),Size=UDim2.fromScale(.18,.18),BackgroundColor3=color,BorderSizePixel=0}) dot:SetAttribute("StudioFixedColor",true) corners(dot,size)
 	end
-	local function applyTheme(which)
-		palette=palettes[which]
-		for _,v in ipairs(gui:GetDescendants()) do style(v) end
-		C_BLACK=palette.base C_GRAY=palette.panel C_LIGHT_GRAY=palette.hover
-		C_GREEN=palette.accent C_DARK_GREEN=palette.line C_WHITE=palette.text
-		borderGradient.Color=ColorSequence.new(palette.line)
-	end
-	-- Assign roles against the original palette before replacing its variables.
-	palette=palettes.load
-	for _,v in ipairs(gui:GetDescendants()) do style(v) end
-	applyTheme("load")
-	StudioHooks.style=style
-	mainStroke.Thickness=1
-	header.Size=UDim2.new(1,0,0,44)
-	bodyFrame.Position=UDim2.fromOffset(0,44)
-	bodyFrame.Size=UDim2.new(1,0,1,-44)
-	title.Text="AUTOBUILD / STUDIO"
-	title.TextSize=17
-	title.Position=UDim2.fromOffset(18,0)
-	local scale=create("UIScale",{Parent=mainFrame,Scale=1})
-	gui.IgnoreGuiInset=true
-	local function fit()
-		local camera=workspace.CurrentCamera
-		if not camera then return end
-		local size=isMaximized and fullSize or normalSize
-		scale.Scale=math.min(1,(camera.ViewportSize.X-24)/size.X.Offset,(camera.ViewportSize.Y-24)/size.Y.Offset)
-	end
-	local fitClock=0
-	trackConn(RunService.RenderStepped:Connect(function(dt)
-		fitClock+=dt
-		if fitClock>.5 then fitClock=0 fit() end
+	return art
+end
+local function bindHover(b)
+	if b:GetAttribute("NovaHoverBound") then return end
+	b:SetAttribute("NovaHoverBound",true)
+	trackConn(b.MouseEnter:Connect(function()
+		local primary=b:GetAttribute("NovaBackground")=="primary"
+		TweenService:Create(b,TweenInfo.new(.13),{BackgroundColor3=primary and palette.primary:Lerp(palette.accent,.15) or palette.hover}):Play()
 	end))
-	fit()
-	local function label(parent,text,pos,size,textSize)
-		return create("TextLabel",{Parent=parent,Text=text,Position=pos,Size=size,BackgroundTransparency=1,TextColor3=C_WHITE,FontFace=FONT_BOLD,TextSize=textSize or 13,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left})
+	trackConn(b.MouseLeave:Connect(function() style(b) end))
+end
+function UI.applyTheme(which)
+	palette=themes[which] or themes.create
+	for _,o in ipairs(gui:GetDescendants()) do style(o) end
+	C_BLACK=palette.base C_GRAY=palette.panel C_LIGHT_GRAY=palette.hover C_GREEN=palette.accent C_DARK_GREEN=palette.line C_WHITE=palette.text
+	for _,g in ipairs(themedGradients) do g.Color=ColorSequence.new(palette.soft,palette.base) end
+	borderGradient.Color=ColorSequence.new(palette.line)
+end
+for _,o in ipairs(gui:GetDescendants()) do style(o) end
+UI.applyTheme("create") StudioHooks.style=style
+mainStroke.Thickness=1 corners(mainFrame,12)
+gui.IgnoreGuiInset=true
+header.Size=UDim2.new(1,0,0,46)
+bodyFrame.Position=UDim2.fromOffset(0,46) bodyFrame.Size=UDim2.new(1,0,1,-46)
+skin(mainFrame,"base")
+local backdrop=create("UIGradient",{Parent=mainFrame,Rotation=24,Color=ColorSequence.new(palette.soft,palette.base)}) themedGradients[#themedGradients+1]=backdrop
+title.Text="ORBIT" title.Position=UDim2.fromOffset(50,0) title.Size=UDim2.fromOffset(86,46) title.TextSize=16 skin(title,nil,"text","strong")
+icon(header,"orbit",UDim2.fromOffset(19,12),22,Color3.fromRGB(179,151,255))
+label(header,"BUILD STUDIO",UDim2.fromOffset(134,0),UDim2.fromOffset(138,46),10,"muted","medium")
+UI.homeBtn=button(header,"",UDim2.fromOffset(14,4),UDim2.fromOffset(113,38),"base") UI.homeBtn.BackgroundTransparency=1
+local homeStroke=UI.homeBtn:FindFirstChildOfClass("UIStroke") if homeStroke then homeStroke:Destroy() end
+for _,b in ipairs({btnMin,btnMax,btnClose}) do b.Size=UDim2.fromOffset(28,28) corners(b,5) b.BackgroundTransparency=1 skin(b,"hover",b==btnClose and "text" or "muted") bindHover(b) end
+local scale=create("UIScale",{Parent=mainFrame,Scale=1})
+local resizing=nil
+local function fit()
+	if resizing then return end
+	local camera=workspace.CurrentCamera
+	if camera then local size=isMaximized and fullSize or normalSize scale.Scale=math.min(1,(camera.ViewportSize.X-24)/size.X.Offset,(camera.ViewportSize.Y-24)/size.Y.Offset) end
+end
+local fitClock=0
+trackConn(RunService.RenderStepped:Connect(function(dt) fitClock+=dt if fitClock>.5 then fitClock=0 fit() end end)) fit()
+local rail=create("Frame",{Name="Navigation",Parent=bodyFrame,Size=UDim2.new(0,84,1,0),BackgroundTransparency=1})
+local divider=create("Frame",{Parent=rail,Position=UDim2.new(1,-1,0,0),Size=UDim2.new(0,1,1,0),BackgroundColor3=palette.line,BorderSizePixel=0}) skin(divider,"line")
+UI.createModeBtn=button(rail,"Творить",UDim2.fromOffset(8,23),UDim2.fromOffset(68,70),"base")
+UI.loadModeBtn=button(rail,"Грузить",UDim2.fromOffset(8,104),UDim2.fromOffset(68,70),"base")
+local settingsBtn=button(rail,"Вид",UDim2.fromOffset(8,185),UDim2.fromOffset(68,70),"base")
+local consoleBtn=button(rail,"Журнал",UDim2.new(0,8,1,-91),UDim2.fromOffset(68,70),"base")
+for _,pair in ipairs({{UI.createModeBtn,"cube"},{UI.loadModeBtn,"load"},{settingsBtn,"settings"}}) do
+	local b=pair[1] b.TextSize=10 b.TextYAlignment=Enum.TextYAlignment.Bottom create("UIPadding",{Parent=b,PaddingBottom=UDim.new(0,10)}) icon(b,pair[2],UDim2.fromOffset(22,13),24,Color3.fromRGB(158,160,191))
+end
+label(consoleBtn,"≡",UDim2.fromOffset(0,7),UDim2.new(1,0,0,28),24,"muted").TextXAlignment=Enum.TextXAlignment.Center
+consoleBtn.TextSize=10 consoleBtn.TextYAlignment=Enum.TextYAlignment.Bottom create("UIPadding",{Parent=consoleBtn,PaddingBottom=UDim.new(0,10)})
+local modeBar=create("Frame",{Parent=bodyFrame,Position=UDim2.fromOffset(108,6),Size=UDim2.new(1,-128,0,36),BackgroundTransparency=1})
+local screenTitle=label(modeBar,"Рабочее пространство",UDim2.new(),UDim2.new(1,-240,1,0),15,"text","strong")
+UI.undoBtn=button(modeBar,"↶",UDim2.new(1,-174,0,3),UDim2.fromOffset(30,30),"deep")
+UI.redoBtn=button(modeBar,"↷",UDim2.new(1,-136,0,3),UDim2.fromOffset(30,30),"deep")
+UI.undoBtn.Text="" UI.redoBtn.Text=""
+icon(UI.undoBtn,"undo",UDim2.fromOffset(7,7),16,Color3.fromRGB(156,157,187))
+icon(UI.redoBtn,"redo",UDim2.fromOffset(7,7),16,Color3.fromRGB(156,157,187))
+UI.codeBtn=button(modeBar,"Код",UDim2.new(1,-98,0,3),UDim2.fromOffset(98,30),"deep")
+tabSection.Position=UDim2.fromOffset(108,50) tabSection.Size=UDim2.new(1,-128,0,32)
+editorFrame.Position=UDim2.fromOffset(108,92) editorFrame.Size=UDim2.new(1,-376,1,-194) skin(editorFrame,"deep") corners(editorFrame,8)
+sideContainer.Position=UDim2.new(1,-248,0,92) sideContainer.Size=UDim2.new(0,228,1,-194) sideContainer.BackgroundTransparency=0 skin(sideContainer,"panel") corners(sideContainer,8)
+for _,child in ipairs(sideContainer:GetChildren()) do if child:IsA("UIListLayout") then child:Destroy() end end
+textScroll.Position=UDim2.fromOffset(10,42) textScroll.Size=UDim2.new(1,-20,1,-56) textScroll.ScrollBarThickness=3
+textBox.Position=UDim2.fromOffset(38,0) textBox.TextSize=14 textBox.TextWrapped=false textBox.PlaceholderText="" textBox.TextXAlignment=Enum.TextXAlignment.Left textBox.TextYAlignment=Enum.TextYAlignment.Top skin(textBox,nil,"text","code")
+local lineNumbers=label(textScroll,"1",UDim2.new(),UDim2.fromOffset(28,28),14,"muted","code") lineNumbers.TextXAlignment=Enum.TextXAlignment.Right lineNumbers.TextYAlignment=Enum.TextYAlignment.Top
+label(editorFrame,"BUILD DATA",UDim2.fromOffset(16,10),UDim2.fromOffset(110,20),10,"muted","medium")
+local recordBadge=label(editorFrame,"0 деталей",UDim2.new(1,-136,0,10),UDim2.fromOffset(120,20),10,"muted") recordBadge.TextXAlignment=Enum.TextXAlignment.Right
+local emptyState=create("Frame",{Parent=editorFrame,Position=UDim2.new(.5,-150,.5,-65),Size=UDim2.fromOffset(300,140),BackgroundTransparency=1})
+icon(emptyState,"load",UDim2.fromOffset(127,0),46,Color3.fromRGB(110,113,146))
+local emptyHeading=label(emptyState,"Начни с постройки",UDim2.fromOffset(0,64),UDim2.fromOffset(300,28),17,"text","strong") emptyHeading.TextXAlignment=Enum.TextXAlignment.Center
+label(emptyState,"Вставь код или сохрани блоки игроков.",UDim2.fromOffset(0,100),UDim2.fromOffset(300,24),11,"muted").TextXAlignment=Enum.TextXAlignment.Center
+local bottom=create("Frame",{Parent=bodyFrame,Position=UDim2.new(0,108,1,-94),Size=UDim2.new(1,-128,0,38),BackgroundTransparency=1})
+local function place(b,parent,pos,size,caption,bg)
+	b.Parent=parent b.Position=pos b.Size=size b.Text=caption b.TextSize=12 b.TextWrapped=false b.BackgroundTransparency=0 b.AutoButtonColor=false skin(b,bg or "panel",bg=="primary" and "white" or "text","medium") corners(b,7) bindHover(b)
+end
+place(btnPaste,bottom,UDim2.new(),UDim2.fromOffset(78,38),"Вставить")
+place(btnCopy,bottom,UDim2.fromOffset(86,0),UDim2.fromOffset(78,38),"Копировать")
+place(btnImport,bottom,UDim2.fromOffset(172,0),UDim2.fromOffset(106,38),"Предпросмотр")
+place(btnStart,bottom,UDim2.new(1,-140,0,0),UDim2.fromOffset(140,38),"Строить","primary")
+UI.planBtn=button(bottom,"План: Авто",UDim2.new(1,-286,0,0),UDim2.fromOffset(138,38),"deep") UI.planBtn.Name="ChoosePlan" UI.planBtn.TextTruncate=Enum.TextTruncate.AtEnd
+UI.moreBtn=button(editorFrame,"···",UDim2.new(1,-46,0,6),UDim2.fromOffset(32,28),"deep")
+recordBadge.Position=UDim2.new(1,-174,0,10)
+UI.primary={btnStart,btnPaste,btnCopy,btnImport,btnToMe}
+local loadInspector=create("Frame",{Parent=sideContainer,Size=UDim2.new(1,0,0,410),BackgroundTransparency=1})
+label(loadInspector,"ПОСТРОЙКА",UDim2.fromOffset(16,14),UDim2.new(1,-32,0,22),10,"muted","medium")
+label(loadInspector,"Сохранение и размещение",UDim2.fromOffset(16,42),UDim2.new(1,-32,0,25),12,"text","medium")
+place(btnMode,loadInspector,UDim2.fromOffset(16,72),UDim2.new(1,-32,0,32),"Выбрать игроков","deep")
+place(btnSave,loadInspector,UDim2.fromOffset(16,110),UDim2.new(1,-32,0,32),"Сохранить их блоки","deep")
+label(loadInspector,"ТРАНСФОРМАЦИЯ",UDim2.fromOffset(16,157),UDim2.new(1,-32,0,20),10,"muted","medium")
+place(btnSnap,loadInspector,UDim2.fromOffset(16,184),UDim2.new(1,-32,0,32),"Выровнять по сетке","deep")
+for i,b in ipairs({btnRot90,btnRot180,btnRotNeg90}) do place(b,loadInspector,UDim2.new((i-1)/3,16-(i-1)*10.5,0,224),UDim2.new(1/3,-15,0,32),({"+90°","180°","−90°"})[i],"deep") end
+place(btnToMe,loadInspector,UDim2.fromOffset(16,264),UDim2.new(1,-32,0,32),"Ко мне","deep")
+label(loadInspector,"План создаётся перед строительством. Выбери шаблон рядом со «Строить».",UDim2.fromOffset(16,308),UDim2.new(1,-32,0,46),11,"muted")
+local menu=create("Frame",{Name="MoreActions",Parent=bodyFrame,Position=UDim2.new(1,-448,0,134),Size=UDim2.fromOffset(200,86),BackgroundColor3=C_GRAY,Visible=false,ZIndex=25}) skin(menu,"panel") corners(menu,8) stroke(menu)
+place(btnClear,menu,UDim2.fromOffset(8,8),UDim2.new(1,-16,0,31),"Очистить код","deep") btnClear.ZIndex=26
+place(btnLog,menu,UDim2.fromOffset(8,47),UDim2.new(1,-16,0,31),"Скопировать журнал","deep") btnLog.ZIndex=26
+UI.extra={btnClear,btnLog}
+place(btnNextChunk,modeBar,UDim2.new(1,-284,0,3),UDim2.fromOffset(102,30),"Следующая часть","deep") btnNextChunk.Visible=false
+UI.creator=create("Frame",{Name="CreationWorkspace",Parent=bodyFrame,Position=editorFrame.Position,Size=editorFrame.Size,BackgroundColor3=C_GRAY,Visible=false}) skin(UI.creator,"deep") corners(UI.creator,8) stroke(UI.creator)
+UI.editorTools=create("Frame",{Parent=UI.creator,Position=UDim2.fromOffset(12,14),Size=UDim2.new(1,-24,0,40),BackgroundTransparency=1})
+UI.toolNames={"mbuild","mpaint","mdelete","msize","mchoose"}
+UI.toolLabels={mbuild="Блок",mpaint="Цвет",mdelete="Удалить",msize="Размер",mchoose="Выбрать"}
+UI.toolButtons={}
+for i,name in ipairs(UI.toolNames) do
+	local b=button(UI.editorTools,UI.toolLabels[name],UDim2.new((i-1)/5,0,0,0),UDim2.new(1/5,-5,1,0),"panel") b.TextSize=11 b.TextXAlignment=Enum.TextXAlignment.Right create("UIPadding",{Parent=b,PaddingRight=UDim.new(0,8)})
+	icon(b,({"cube","paint","delete","size","select"})[i],UDim2.fromOffset(9,11),18,Color3.fromRGB(171,157,218)) UI.toolButtons[name]=b
+end
+UI.sceneStats=label(UI.creator,"0 деталей",UDim2.fromOffset(16,64),UDim2.new(1,-32,0,22),11,"muted")
+UI.selectionStats=label(sideContainer,"Выбрано: 0",UDim2.fromOffset(16,44),UDim2.new(1,-32,0,22),11,"muted")
+UI.toolHint=label(UI.creator,"Выбери инструмент сверху или в инвентаре.",UDim2.new(0,16,1,-48),UDim2.new(1,-32,0,36),11,"muted")
+local viewport=create("ViewportFrame",{Name="SceneOverview",Parent=UI.creator,Position=UDim2.fromOffset(12,98),Size=UDim2.new(1,-24,1,-154),BackgroundColor3=palette.panel,Ambient=Color3.fromRGB(190,177,225),LightColor=Color3.fromRGB(231,220,255),LightDirection=Vector3.new(-1,-1,-1)}) skin(viewport,"panel") corners(viewport,7)
+local previewWorld=create("WorldModel",{Parent=viewport})
+local previewCamera=create("Camera",{Parent=viewport,FieldOfView=42}) viewport.CurrentCamera=previewCamera
+local overviewEmpty=label(viewport,"Твоя мастерская",UDim2.new(.5,-150,.5,-20),UDim2.fromOffset(300,40),19,"muted","strong") overviewEmpty.TextXAlignment=Enum.TextXAlignment.Center
+local creatorInspector=create("Frame",{Parent=sideContainer,Size=UDim2.new(1,0,0,570),BackgroundTransparency=1,Visible=false})
+label(creatorInspector,"СВОЙСТВА",UDim2.fromOffset(16,14),UDim2.new(1,-32,0,22),10,"muted","medium")
+UI.selectionStats.Parent=creatorInspector
+UI.toolOptions=create("Frame",{Parent=creatorInspector,Position=UDim2.fromOffset(16,80),Size=UDim2.new(1,-32,0,410),BackgroundTransparency=1})
+UI.buildToggle=button(UI.toolOptions,"Куб 4 × 4 × 4 · R",UDim2.new(),UDim2.new(1,0,0,34),"deep")
+UI.sizeToggle=button(UI.toolOptions,"Увеличить грань · R",UDim2.fromOffset(0,42),UDim2.new(1,0,0,34),"deep")
+UI.copyToggle=button(UI.toolOptions,"Копировать деталь: да",UDim2.fromOffset(0,84),UDim2.new(1,0,0,34),"deep")
+UI.overlapToggle=button(UI.toolOptions,"Пересечения: нет",UDim2.fromOffset(0,126),UDim2.new(1,0,0,34),"deep")
+local colorCaption=label(UI.toolOptions,"ЦВЕТ HEX",UDim2.fromOffset(0,176),UDim2.new(1,0,0,20),10,"muted","medium")
+UI.hexField=field(UI.toolOptions,"C0C0C0",UDim2.fromOffset(0,204),UDim2.new(1,-44,0,34))
+UI.swatch=create("Frame",{Parent=UI.toolOptions,BackgroundColor3=Color3.fromRGB(192,192,192),Position=UDim2.new(1,-34,0,204),Size=UDim2.fromOffset(34,34)}) UI.swatch:SetAttribute("StudioFixedColor",true) corners(UI.swatch,6)
+UI.materialButton=button(UI.toolOptions,"Материал: Plastic",UDim2.fromOffset(0,246),UDim2.new(1,0,0,34),"deep") UI.materialButton.TextSize=11
+icon(UI.materialButton,"chevron",UDim2.new(1,-22,0,10),14,Color3.fromRGB(141,145,173))
+UI.paintModeButton=button(UI.toolOptions,"Покраска: цвет + материал",UDim2.fromOffset(0,288),UDim2.new(1,0,0,34),"deep") UI.paintModeButton.TextSize=10
+UI.collideToggle=button(UI.toolOptions,"Collide в коде: включён",UDim2.fromOffset(0,330),UDim2.new(1,0,0,34),"deep") UI.collideToggle.TextSize=10
+UI.sprayField=field(UI.toolOptions,"",UDim2.fromOffset(0,372),UDim2.new(1,0,0,34)) UI.sprayField.PlaceholderText="Текст на грани"
+UI.sprayColorField=field(UI.toolOptions,"FFFFFF",UDim2.fromOffset(0,414),UDim2.new(1,0,0,34))
+creatorInspector.Size=UDim2.new(1,0,0,556)
+UI.materialList=create("ScrollingFrame",{Name="Materials",Parent=bodyFrame,Position=UDim2.new(1,-244,0,170),Size=UDim2.fromOffset(220,330),BackgroundColor3=C_BLACK,CanvasSize=UDim2.new(),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=3,Visible=false,ZIndex=35}) skin(UI.materialList,"deep") corners(UI.materialList,8) stroke(UI.materialList)
+create("UIListLayout",{Parent=UI.materialList,Padding=UDim.new(0,3)})
+local materials={} for m in pairs(MaterialSymbols) do materials[#materials+1]=m end table.sort(materials,function(a,b) return a.Name<b.Name end)
+UI.materialChoices={}
+for _,m in ipairs(materials) do local b=button(UI.materialList,m.Name,UDim2.new(),UDim2.new(1,-5,0,32),"deep") b.ZIndex=36 UI.materialChoices[m]=b end
+UI.selectionCopy=button(bottom,"Копировать выбор",UDim2.new(),UDim2.fromOffset(154,38),"panel")
+UI.selectionClear=button(bottom,"Снять выбор",UDim2.fromOffset(162,0),UDim2.fromOffset(118,38),"panel")
+UI.toCodeBtn=button(bottom,"Выделенное → вкладка",UDim2.new(1,-218,0,0),UDim2.fromOffset(218,38),"primary")
+UI.welcome=create("Frame",{Name="Welcome",Parent=bodyFrame,Position=UDim2.fromOffset(84,0),Size=UDim2.new(1,-84,1,0),BackgroundColor3=C_BLACK,ZIndex=20}) skin(UI.welcome,"base")
+local welcomeGradient=create("UIGradient",{Parent=UI.welcome,Rotation=35,Color=ColorSequence.new(palette.soft,palette.base)}) themedGradients[#themedGradients+1]=welcomeGradient
+local bigHeading=label(UI.welcome,"Одна идея.\nЦелый мир.",UDim2.fromOffset(36,40),UDim2.new(1,-72,0,94),34,"text","strong") bigHeading.ZIndex=22 bigHeading.TextYAlignment=Enum.TextYAlignment.Top
+local subHeading=label(UI.welcome,"Построй с нуля или загрузи то, что уже придумал.",UDim2.fromOffset(38,143),UDim2.new(1,-76,0,28),13,"muted") subHeading.ZIndex=22
+for i=1,36 do
+	local size=i%9==0 and 3 or 2
+	local s=create("Frame",{Parent=UI.welcome,Position=UDim2.new(((i*73)%997)/997,0,((i*47)%311)/311,0),Size=UDim2.fromOffset(size,size),BackgroundColor3=Color3.fromRGB(150,142,192),BackgroundTransparency=.45+(i%4)*.1,BorderSizePixel=0,ZIndex=21}) s:SetAttribute("StudioFixedColor",true) corners(s,3) stars[#stars+1]=s s.Visible=settings.stars
+end
+for i=1,3 do
+	local r=create("Frame",{Parent=UI.welcome,AnchorPoint=Vector2.new(.5,.5),Position=UDim2.new(.87,0,.15,0),Size=UDim2.fromOffset(140+i*48,58+i*19),Rotation=-31+i*12,BackgroundTransparency=1,ZIndex=21}) corners(r,200)
+	local s=stroke(r) s:SetAttribute("StudioFixedColor",true) s.Color=Color3.fromRGB(68,53,109) s.Transparency=.35
+end
+UI.cards={}
+for i,which in ipairs({"create","load"}) do
+	local b=button(UI.welcome,"",UDim2.new((i-1)*.5,36-(i-1)*20,0,200),UDim2.new(.5,-52,1,-276),"panel") b.Name="NovaCard_"..which b.ZIndex=22 corners(b,12)
+	local ink=which=="create" and Color3.fromRGB(189,158,255) or Color3.fromRGB(239,205,146)
+	local art=icon(b,which=="create" and "cube" or "load",UDim2.fromOffset(25,20),44,ink)
+	for _,o in ipairs(art:GetDescendants()) do if o:IsA("GuiObject") then o.ZIndex=23 end end
+	local tag=label(b,which=="create" and "WORKSPACE" or "LOADER",UDim2.new(1,-120,0,30),UDim2.fromOffset(94,24),9,"muted","medium") tag.ZIndex=23 tag.TextXAlignment=Enum.TextXAlignment.Right
+	local h=label(b,which=="create" and "Творить" or "Грузить",UDim2.fromOffset(26,84),UDim2.new(1,-52,0,34),24,"text","strong") h.ZIndex=23
+	local d=label(b,which=="create" and "Мнимый bkit. Твои детали,\nцвета и формы." or "Готовый код. Маршрут\nс проверкой каждого блока.",UDim2.fromOffset(26,126),UDim2.new(1,-52,0,48),12,"muted") d.ZIndex=23
+	local arrow=label(b,"→",UDim2.new(1,-54,1,-48),UDim2.fromOffset(26,28),20,"accent") arrow.ZIndex=23
+	UI.cards[which]=b
+end
+local welcomeFoot=label(UI.welcome,"R — режим инструмента     Ctrl + Z — отмена     Right Shift — скрыть окно",UDim2.new(0,38,1,-63),UDim2.new(1,-76,0,26),10,"muted") welcomeFoot.ZIndex=22
+footerFrame.Position=UDim2.new(0,108,1,-46) footerFrame.Size=UDim2.new(1,-128,0,40)
+statDisplay.Size=UDim2.new(.65,0,0,18) statDisplay.TextSize=10 statDisplay.TextXAlignment=Enum.TextXAlignment.Left skin(statDisplay,nil,"muted")
+perfDisplay.Position=UDim2.new(.65,0,0,0) perfDisplay.Size=UDim2.new(.35,0,0,18) perfDisplay.TextSize=10 perfDisplay.TextXAlignment=Enum.TextXAlignment.Right skin(perfDisplay,nil,"muted")
+statusLabel.Position=UDim2.fromOffset(0,21) statusLabel.Size=UDim2.new(1,0,0,18) statusLabel.TextSize=10 statusLabel.TextWrapped=false statusLabel.TextTruncate=Enum.TextTruncate.AtEnd statusLabel.TextXAlignment=Enum.TextXAlignment.Left statusLabel.Active=true skin(statusLabel,nil,"muted")
+local console=create("Frame",{Name="ConsoleDrawer",Parent=bodyFrame,Position=UDim2.new(0,108,1,-292),Size=UDim2.new(1,-128,0,188),BackgroundColor3=C_GRAY,Visible=false,ZIndex=40}) skin(console,"panel") corners(console,8) stroke(console)
+local consoleTitle=label(console,"ЖУРНАЛ",UDim2.fromOffset(14,8),UDim2.fromOffset(160,22),10,"muted","medium") consoleTitle.ZIndex=41
+local closeConsole=button(console,"×",UDim2.new(1,-38,0,6),UDim2.fromOffset(28,26),"deep") closeConsole.ZIndex=41
+local consoleScroll=create("ScrollingFrame",{Parent=console,Position=UDim2.fromOffset(12,38),Size=UDim2.new(1,-24,1,-50),BackgroundTransparency=1,CanvasSize=UDim2.new(),ScrollBarThickness=3,ZIndex=41})
+local consoleText=create("TextBox",{Parent=consoleScroll,Position=UDim2.new(),Size=UDim2.new(1,0,1,0),Text="",BackgroundTransparency=1,TextEditable=false,MultiLine=true,ClearTextOnFocus=false,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,FontFace=Fonts.code,TextColor3=C_WHITE,TextSize=11,ZIndex=42}) skin(consoleText,nil,"muted","code")
+local function refreshConsole()
+	consoleText.Text=table.concat(diagnosticLog,"\n")
+	local columns=math.max(30,math.floor(consoleScroll.AbsoluteSize.X/6)) local rows=0
+	for l in consoleText.Text:gmatch("[^\n]+") do rows+=math.max(1,math.ceil(#l/columns)) end
+	local height=math.max(138,rows*16)
+	consoleText.Size=UDim2.new(1,0,0,height) consoleScroll.CanvasSize=UDim2.fromOffset(0,height) consoleScroll.CanvasPosition=Vector2.new(0,math.max(0,height-138))
+end
+StudioHooks.status=function() if console.Visible then refreshConsole() end end
+local function toggleConsole() console.Visible=not console.Visible if console.Visible then refreshConsole() end end
+trackConn(consoleBtn.MouseButton1Click:Connect(toggleConsole)) trackConn(closeConsole.MouseButton1Click:Connect(function() console.Visible=false end))
+trackConn(statusLabel.InputBegan:Connect(function(input) if input.UserInputType==Enum.UserInputType.MouseButton1 then toggleConsole() end end))
+local appearance=create("Frame",{Name="Appearance",Parent=bodyFrame,Position=UDim2.fromOffset(108,50),Size=UDim2.new(1,-128,1,-108),BackgroundColor3=C_GRAY,Visible=false}) skin(appearance,"deep") corners(appearance,8)
+label(appearance,"Вид рабочего пространства",UDim2.fromOffset(28,24),UDim2.new(1,-56,0,34),22,"text","strong")
+label(appearance,"Тёмная тема, фиолетовый космос и тёплый акцент загрузки.",UDim2.fromOffset(28,66),UDim2.new(1,-56,0,28),12,"muted")
+local starsToggle=button(appearance,"Звёзды: включены",UDim2.fromOffset(28,126),UDim2.fromOffset(270,38),"panel")
+label(appearance,"Right Shift скрывает окно, сохраняя работу.\nПеретаскивай окно за верхнюю панель.\nПотяни нижний правый угол, чтобы изменить размер.",UDim2.fromOffset(28,195),UDim2.new(1,-56,0,96),13,"muted")
+local appearanceOpen=false
+local state={mode="welcome",code=false,more=false,tool=nil,paint="both"}
+local function refreshVisibility()
+	local creating=state.mode=="create"
+	UI.welcome.Visible=state.mode=="welcome" and not appearanceOpen
+	tabSection.Visible=state.mode~="welcome" and not appearanceOpen
+	editorFrame.Visible=(state.mode=="load" or creating and state.code) and not appearanceOpen
+	UI.creator.Visible=creating and not state.code and not appearanceOpen
+	sideContainer.Visible=state.mode~="welcome" and not appearanceOpen
+	loadInspector.Visible=not creating creatorInspector.Visible=creating
+	bottom.Visible=state.mode~="welcome" and not appearanceOpen
+	menu.Visible=not creating and state.more and not appearanceOpen
+	appearance.Visible=appearanceOpen
+	UI.moreBtn.Visible=not creating
+	UI.planBtn.Visible=not creating
+	UI.planBtn.Text="План: "..(PlanLibrary.selection()=="auto" and "Авто" or PlanLibrary.selection())
+	for _,b in ipairs(UI.primary) do b.Visible=not creating end
+	for _,b in ipairs(UI.extra) do b.Visible=not creating and state.more end
+	UI.selectionCopy.Visible=creating UI.selectionClear.Visible=creating UI.toCodeBtn.Visible=creating
+	UI.codeBtn.Visible=state.mode~="welcome" and not appearanceOpen
+	UI.codeBtn.Text=creating and (state.code and "Обзор" or "Код") or "К редактору"
+	screenTitle.Text=appearanceOpen and "Настройки вида" or creating and "Мастерская" or state.mode=="load" and "Загрузка постройки" or "Добро пожаловать"
+	for _,pair in ipairs({{UI.createModeBtn,creating},{UI.loadModeBtn,state.mode=="load"},{settingsBtn,appearanceOpen}}) do skin(pair[1],pair[2] and "soft" or "base",pair[2] and "accent" or "muted") end
+	local tool=state.tool or "mbuild"
+	UI.buildToggle.Visible=tool=="mbuild" UI.copyToggle.Visible=tool=="mbuild"
+	UI.sizeToggle.Visible=tool=="msize"
+	UI.overlapToggle.Visible=tool=="mbuild" or tool=="msize"
+	local painting=tool=="mpaint" or tool=="mbuild"
+	colorCaption.Visible=painting UI.hexField.Visible=painting UI.swatch.Visible=painting UI.materialButton.Visible=painting
+	UI.paintModeButton.Visible=tool=="mpaint" UI.collideToggle.Visible=painting and state.paint~="spray" UI.sprayField.Visible=tool=="mpaint" and state.paint=="spray" UI.sprayColorField.Visible=UI.sprayField.Visible
+	if tool=="mpaint" then
+		local colour=state.paint=="both" or state.paint=="color"
+		colorCaption.Visible=colour UI.hexField.Visible=colour UI.swatch.Visible=colour
+		UI.materialButton.Visible=state.paint=="both" or state.paint=="material"
 	end
-	local function button(parent,text,pos,size,callback)
-		local b=create("TextButton",{Parent=parent,Text=text,Position=pos,Size=size,BackgroundColor3=C_GRAY,TextColor3=C_WHITE,FontFace=FONT_BOLD,TextSize=12,TextWrapped=true,AutoButtonColor=true})
-		addCorner(b,9) addStroke(b,1,C_DARK_GREEN)
-		if callback then trackConn(b.MouseButton1Click:Connect(callback)) end
-		return b
+	-- Compact the inspector instead of leaving blank rows for hidden controls.
+	local y=0
+	for _,b in ipairs({UI.buildToggle,UI.sizeToggle,UI.copyToggle,UI.overlapToggle}) do if b.Visible then b.Position=UDim2.fromOffset(0,y) y+=42 end end
+	if colorCaption.Visible then
+		colorCaption.Position=UDim2.fromOffset(0,y+4) y+=30 UI.hexField.Position=UDim2.fromOffset(0,y) UI.swatch.Position=UDim2.new(1,-34,0,y) y+=42
 	end
-	local function field(parent,text,pos,size)
-		local f=create("TextBox",{Parent=parent,Text=text,Position=pos,Size=size,BackgroundColor3=C_BLACK,TextColor3=C_WHITE,ClearTextOnFocus=false,FontFace=FONT_BOLD,TextSize=12})
-		addCorner(f,7) addStroke(f,1,C_DARK_GREEN)
-		return f
+	for _,b in ipairs({UI.materialButton,UI.paintModeButton,UI.collideToggle,UI.sprayField,UI.sprayColorField}) do if b.Visible then b.Position=UDim2.fromOffset(0,y) y+=42 end end
+	creatorInspector.Size=UDim2.new(1,0,0,math.max(240,y+96))
+	for name,b in pairs(UI.toolButtons) do skin(b,name==state.tool and "soft" or "panel",name==state.tool and "accent" or "text") end
+	UI.materialList.Visible=false
+end
+function UI.mode(mode,code,more) state.mode=mode state.code=code state.more=more appearanceOpen=false refreshVisibility() end
+function UI.tool(name) state.tool=name refreshVisibility() end
+function UI.paint(name) state.paint=name refreshVisibility() end
+trackConn(settingsBtn.MouseButton1Click:Connect(function() appearanceOpen=not appearanceOpen refreshVisibility() end))
+trackConn(starsToggle.MouseButton1Click:Connect(function()
+	settings.stars=not settings.stars starsToggle.Text=settings.stars and "Звёзды: включены" or "Звёзды: выключены"
+	for _,s in ipairs(stars) do s.Visible=settings.stars end
+	saveAppearance()
+end))
+starsToggle.Text=settings.stars and "Звёзды: включены" or "Звёзды: выключены"
+trackConn(UserInputService.InputBegan:Connect(function(input)
+	if input.KeyCode==Enum.KeyCode.RightShift and not UserInputService:GetFocusedTextBox() then mainFrame.Visible=not mainFrame.Visible end
+end))
+function UI.editor(text)
+	local lines=1 local longest=0
+	for l in (text.."\n"):gmatch("([^\n]*)\n") do longest=math.max(longest,#l) end
+	for _ in text:gmatch("\n") do lines+=1 end
+	local numbers={} for i=1,math.min(lines,4000) do numbers[i]=tostring(i) end
+	lineNumbers.Text=table.concat(numbers,"\n")
+	local height=math.max(textScroll.AbsoluteSize.Y,lines*16+24)
+	local width=math.max(textScroll.AbsoluteSize.X,math.min(12000,longest*7+66))
+	textBox.Size=UDim2.fromOffset(width-40,height) lineNumbers.Size=UDim2.fromOffset(28,height) textScroll.CanvasSize=UDim2.fromOffset(width,height)
+	emptyState.Visible=text==""
+	local count=0 for _ in (_G.fullBuildString or text):gmatch("|[^|]+|") do count+=1 end
+	recordBadge.Text=count.." деталей"
+end
+StudioHooks.editor=UI.editor UI.editor(textBox.Text)
+local function responsive()
+	local width=mainFrame.Size.X.Offset
+	local compact=width<940
+	for name,b in pairs(UI.toolButtons) do
+		b.Name="Tool_"..name b.Text=compact and "" or UI.toolLabels[name]
+		local art=b:FindFirstChild("Icon_"..({mbuild="cube",mpaint="paint",mdelete="delete",msize="size",mchoose="select"})[name])
+		if art then art.Position=compact and UDim2.new(.5,-9,0,11) or UDim2.fromOffset(9,11) end
 	end
-	local modeBar=create("Frame",{Parent=bodyFrame,BackgroundTransparency=1,Position=UDim2.fromOffset(14,5),Size=UDim2.new(1,-28,0,36)})
-	local createModeBtn=button(modeBar,"✦ Творить",UDim2.fromOffset(0,0),UDim2.fromOffset(128,34))
-	local loadModeBtn=button(modeBar,"↑ Грузить",UDim2.fromOffset(136,0),UDim2.fromOffset(128,34))
-	local undoBtn=button(modeBar,"↶",UDim2.new(1,-148,0,0),UDim2.fromOffset(34,34))
-	local redoBtn=button(modeBar,"↷",UDim2.new(1,-108,0,0),UDim2.fromOffset(34,34))
-	local codeBtn=button(modeBar,"Код",UDim2.new(1,-68,0,0),UDim2.fromOffset(68,34))
-	tabSection.Position=UDim2.fromOffset(14,48)
-	tabSection.Size=UDim2.new(1,-28,0,34)
-	editorFrame.Position=UDim2.fromOffset(14,90)
-	editorFrame.Size=UDim2.new(1,-224,1,-156)
-	sideContainer.Position=UDim2.new(1,-196,0,90)
-	sideContainer.Size=UDim2.new(0,182,1,-156)
-	footerFrame.Position=UDim2.new(0,14,1,-62)
-	footerFrame.Size=UDim2.new(1,-28,0,58)
-	textScroll.Position=UDim2.fromOffset(12,12)
-	textScroll.Size=UDim2.new(1,-24,1,-24)
-	textBox.PlaceholderText="Вставь код постройки и нажми «Строить». План рассчитывается автоматически перед строительством."
-	textBox.TextSize=13
-	local primary={btnStart,btnImport,btnToMe,btnSave,btnMode}
-	local extra={btnRot90,btnRot180,btnRotNeg90,btnPaste,btnCopy,btnClear,btnSnap,btnLog}
-	local captions={
-		[btnStart]="Строить",[btnImport]="Предпросмотр",[btnToMe]="Ко мне",[btnSave]="Снять постройку",[btnMode]="Выбрать игроков",
-		[btnRot90]="Повернуть +90°",[btnRot180]="Повернуть 180°",[btnRotNeg90]="Повернуть −90°",[btnPaste]="Вставить код",[btnCopy]="Скопировать код",[btnClear]="Очистить код",[btnSnap]="На сетку",[btnLog]="Диагностика"
-	}
-	for i,b in ipairs(primary) do b.LayoutOrder=i b.Size=UDim2.new(1,-4,0,38) b.TextSize=12 b.Text=captions[b] end
-	for i,b in ipairs(extra) do b.LayoutOrder=20+i b.Size=UDim2.new(1,-4,0,34) b.TextSize=12 b.Text=captions[b] end
-	local moreBtn=button(sideContainer,"Ещё действия ▾",UDim2.new(),UDim2.new(1,-4,0,34))
-	moreBtn.LayoutOrder=10
-	local creator=create("ScrollingFrame",{Parent=bodyFrame,Position=editorFrame.Position,Size=editorFrame.Size,BackgroundColor3=C_GRAY,ScrollBarThickness=3,CanvasSize=UDim2.fromOffset(0,630),Visible=false})
-	addCorner(creator,12) addStroke(creator,1,C_DARK_GREEN)
-	label(creator,"Твоя мастерская",UDim2.fromOffset(18,16),UDim2.new(1,-36,0,30),22)
-	label(creator,"Локальные детали · доступны без bkit",UDim2.fromOffset(18,50),UDim2.new(1,-36,0,22),12)
-	local sceneStats=label(creator,"0 деталей",UDim2.fromOffset(18,82),UDim2.new(1,-36,0,28),14)
-	local toolHint=label(creator,"Выбери инструмент справа или в инвентаре.",UDim2.fromOffset(18,118),UDim2.new(1,-36,0,56),14)
-	local editorTools=create("Frame",{Parent=sideContainer,BackgroundTransparency=1,Size=UDim2.new(1,-4,0,300),LayoutOrder=0,Visible=false})
-	local toolButtons={}
-	local toolNames={"mbuild","mpaint","mdelete","msize","mchoose"}
-	local toolLabels={mbuild="▧  Построить",mpaint="◈  Покрасить",mdelete="×  Удалить",msize="↔  Размер",mchoose="□  Выделить"}
-	for i,name in ipairs(toolNames) do toolButtons[name]=button(editorTools,toolLabels[name],UDim2.fromOffset(0,(i-1)*43),UDim2.new(1,0,0,38)) end
-	local selectionStats=label(editorTools,"Выбрано: 0",UDim2.fromOffset(4,218),UDim2.new(1,-8,0,22),12)
-	local toCodeBtn=button(editorTools,"Выделенное → вкладка",UDim2.fromOffset(0,245),UDim2.new(1,0,0,36))
-	local toolOptions=create("Frame",{Parent=creator,Position=UDim2.fromOffset(18,190),Size=UDim2.new(1,-36,0,390),BackgroundTransparency=1})
-	local buildToggle=button(toolOptions,"Куб 4 × 4 × 4 · R",UDim2.fromOffset(0,0),UDim2.new(.5,-4,0,34))
-	local sizeToggle=button(toolOptions,"Увеличить грань · R",UDim2.new(.5,4,0,0),UDim2.new(.5,-4,0,34))
-	local copyToggle=button(toolOptions,"Копировать деталь: да",UDim2.fromOffset(0,42),UDim2.new(.5,-4,0,34))
-	local overlapToggle=button(toolOptions,"Пересечения: нет",UDim2.new(.5,4,0,42),UDim2.new(.5,-4,0,34))
-	label(toolOptions,"Цвет HEX",UDim2.fromOffset(0,90),UDim2.fromOffset(90,24))
-	local hexField=field(toolOptions,"C0C0C0",UDim2.fromOffset(96,86),UDim2.fromOffset(100,32))
-	local swatch=create("Frame",{Parent=toolOptions,BackgroundColor3=paintColor,Position=UDim2.fromOffset(204,86),Size=UDim2.fromOffset(32,32)})
-	swatch:SetAttribute("StudioFixedColor",true) addCorner(swatch,8)
-	local materialButton=button(toolOptions,"Материал: Plastic ▾",UDim2.fromOffset(0,126),UDim2.new(1,0,0,34))
-	local materialList=create("ScrollingFrame",{Parent=creator,Position=UDim2.fromOffset(18,190),Size=UDim2.new(1,-36,0,330),BackgroundColor3=C_BLACK,CanvasSize=UDim2.new(),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=4,Visible=false,ZIndex=8})
-	addCorner(materialList,10)
-	create("UIListLayout",{Parent=materialList,Padding=UDim.new(0,4)})
-	local materials={}
-	for material in pairs(MaterialSymbols) do materials[#materials+1]=material end
-	table.sort(materials,function(a,b) return a.Name<b.Name end)
-	for _,material in ipairs(materials) do
-		local b=button(materialList,material.Name,UDim2.new(),UDim2.new(1,-6,0,32),function()
-			paintMaterial=material materialButton.Text="Материал: "..material.Name.." ▾" materialList.Visible=false
-		end)
-		b.ZIndex=9
+	UI.editor(textBox.Text)
+end
+trackConn(mainFrame:GetPropertyChangedSignal("Size"):Connect(responsive)) responsive()
+local grip=button(bodyFrame,"",UDim2.new(1,-24,1,-24),UDim2.fromOffset(22,22),"base") grip.Name="ResizeGrip" grip.ZIndex=65 grip.BackgroundTransparency=1
+local gripStroke=grip:FindFirstChildOfClass("UIStroke") if gripStroke then gripStroke:Destroy() end
+for i=1,3 do line(grip,Vector2.new(20-i*5,20),Vector2.new(20,20-i*5),Color3.fromRGB(128,120,160),1,66) end
+trackConn(grip.InputBegan:Connect(function(input)
+	if input.UserInputType~=Enum.UserInputType.MouseButton1 and input.UserInputType~=Enum.UserInputType.Touch or isMinimized then return end
+	if openTween then openTween:Cancel() end
+	local size=mainFrame.Size local topLeft=mainFrame.AbsolutePosition
+	resizing={origin=input.Position,topLeft=topLeft,width=size.X.Offset,height=size.Y.Offset,scale=scale.Scale}
+	isMaximized=false mainFrame.AnchorPoint=Vector2.new(0,0) mainFrame.Position=UDim2.fromOffset(topLeft.X,topLeft.Y)
+end))
+trackConn(UserInputService.InputChanged:Connect(function(input)
+	if not resizing or input.UserInputType~=Enum.UserInputType.MouseMovement and input.UserInputType~=Enum.UserInputType.Touch then return end
+	local delta=(input.Position-resizing.origin)/math.max(.1,resizing.scale)
+	local width=math.clamp(math.floor(resizing.width+delta.X+.5),740,1600)
+	local height=math.clamp(math.floor(resizing.height+delta.Y+.5),520,1000)
+	normalSize=UDim2.fromOffset(width,height) mainFrame.Size=normalSize responsive()
+end))
+local function finishResize()
+	if not resizing then return end
+	local r=resizing resizing=nil
+	mainFrame.AnchorPoint=Vector2.new(.5,.5)
+	mainFrame.Position=UDim2.fromOffset(r.topLeft.X+normalSize.X.Offset*r.scale/2,r.topLeft.Y+normalSize.Y.Offset*r.scale/2)
+	settings.width=normalSize.X.Offset settings.height=normalSize.Y.Offset minimizedSize=UDim2.fromOffset(settings.width,46)
+	saveAppearance() fit()
+end
+trackConn(UserInputService.InputEnded:Connect(function(input) if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then finishResize() end end))
+trackConn(UserInputService.WindowFocusReleased:Connect(finishResize))
+-- Search plus six cards per page; no dropdown or scrolling list.
+do
+	local shade=create("Frame",{Name="PlanPicker",Parent=bodyFrame,Size=UDim2.fromScale(1,1),BackgroundColor3=Color3.fromRGB(5,6,13),BackgroundTransparency=.15,Visible=false,Active=true,ZIndex=70}) shade:SetAttribute("StudioFixedColor",true)
+	local panel=create("Frame",{Parent=shade,Position=UDim2.fromOffset(100,18),Size=UDim2.new(1,-118,1,-36),BackgroundColor3=C_GRAY,ZIndex=71}) skin(panel,"deep") corners(panel,10) stroke(panel)
+	label(panel,"Библиотека планов",UDim2.fromOffset(20,12),UDim2.new(1,-70,0,30),19,"text","strong").ZIndex=72
+	local close=button(panel,"×",UDim2.new(1,-44,0,14),UDim2.fromOffset(28,28),"panel") close.ZIndex=72
+	local search=field(panel,"",UDim2.fromOffset(20,54),UDim2.new(1,-162,0,34)) search.Name="PlanSearch" search.PlaceholderText="Найти по названию…" search.ZIndex=72
+	local automatic=button(panel,"Авто",UDim2.new(1,-132,0,54),UDim2.fromOffset(112,34),"soft") automatic.ZIndex=72
+	label(panel,"Шаблон задаёт порядок. Геометрия и безопасность проверяются заново.",UDim2.fromOffset(20,96),UDim2.new(1,-40,0,28),10,"muted").ZIndex=72
+	local area=create("Frame",{Parent=panel,Position=UDim2.fromOffset(20,132),Size=UDim2.new(1,-40,1,-198),BackgroundTransparency=1,ZIndex=72})
+	local empty=label(area,"Пока нет планов.\nПервый сохранится при начале строительства.",UDim2.fromOffset(0,20),UDim2.new(1,0,0,80),13,"muted") empty.Name="PlansEmpty" empty.ZIndex=73 empty.TextXAlignment=Enum.TextXAlignment.Center
+	local prev=button(panel,"←",UDim2.new(0,20,1,-48),UDim2.fromOffset(38,30),"panel") prev.ZIndex=72
+	local nextPage=button(panel,"→",UDim2.new(1,-58,1,-48),UDim2.fromOffset(38,30),"panel") nextPage.ZIndex=72
+	local pageLabel=label(panel,"",UDim2.new(.5,-140,1,-48),UDim2.fromOffset(280,30),11,"muted") pageLabel.ZIndex=72 pageLabel.TextXAlignment=Enum.TextXAlignment.Center
+	local page,cardObjects,cardConnections=1,{},{}
+	local refresh
+	local function choose(file)
+		local ok,message=PlanLibrary.select(file)
+		if not ok then setStatus(message,true) return end
+		shade.Visible=false UI.planBtn.Text="План: "..(file=="auto" and "Авто" or file)
+		setStatus(file=="auto" and "План будет выбран автоматически" or "Шаблон: "..file.." · пересчитается перед строительством")
 	end
-	local paintModeButton=button(toolOptions,"Покраска: цвет + материал",UDim2.fromOffset(0,168),UDim2.new(1,0,0,34))
-	local collideToggle=button(toolOptions,"Collide в коде: включён",UDim2.fromOffset(0,210),UDim2.new(1,0,0,34))
-	local sprayField=field(toolOptions,"",UDim2.fromOffset(0,252),UDim2.new(.72,-4,0,34))
-	sprayField.PlaceholderText="Текст на выбранной грани"
-	local sprayColorField=field(toolOptions,"FFFFFF",UDim2.new(.72,4,0,252),UDim2.new(.28,-4,0,34))
-	label(toolOptions,"Все детали закреплены. Collide хранится для настоящей постройки; локальные детали не мешают персонажу.",UDim2.fromOffset(0,296),UDim2.new(1,0,0,58),11)
-	local selectionCopy=button(creator,"Копировать выделение",UDim2.fromOffset(18,586),UDim2.new(.5,-22,0,32))
-	local selectionClear=button(creator,"Снять выделение",UDim2.new(.5,4,0,586),UDim2.new(.5,-22,0,32))
-	local welcome=create("Frame",{Parent=bodyFrame,Size=UDim2.new(1,0,1,0),BackgroundColor3=C_BLACK,ZIndex=30})
-	local welcomeTitle=label(welcome,"Что будем делать?",UDim2.fromOffset(28,38),UDim2.new(1,-56,0,45),28)
-	welcomeTitle.ZIndex=31
-	local welcomeSub=label(welcome,"Создай свою постройку или загрузи готовую",UDim2.fromOffset(28,91),UDim2.new(1,-56,0,28),14)
-	welcomeSub.ZIndex=31
-	local cards={}
-	for i,which in ipairs({"create","load"}) do
-		local card=button(welcome,"",UDim2.new((i-1)*.5,24,0,153),UDim2.new(.5,-36,1,-208))
-		card.ZIndex=31
-		card:SetAttribute("StudioFixedColor",true)
-		card.BackgroundColor3=which=="create" and Color3.fromRGB(35,25,66) or Color3.fromRGB(239,226,183)
-		local ink=which=="create" and Color3.fromRGB(224,200,255) or Color3.fromRGB(109,76,17)
-		local heading=label(card,which=="create" and "Творить" or "Грузить",UDim2.new(0,22,1,-96),UDim2.new(1,-44,0,34),24)
-		heading:SetAttribute("StudioFixedColor",true) heading.TextColor3=ink heading.ZIndex=32
-		local description=label(card,which=="create" and "Мнимый bkit · локальная мастерская" or "Код → план → настоящая постройка",UDim2.new(0,22,1,-55),UDim2.new(1,-44,0,35),12)
-		description:SetAttribute("StudioFixedColor",true) description.TextColor3=ink description.ZIndex=32
-		local art=create("Frame",{Parent=card,Position=UDim2.new(.5,-70,.4,-52),Size=UDim2.fromOffset(140,110),BackgroundTransparency=1,ZIndex=32})
-		local function shape(pos,size,rotation)
-			local item=create("Frame",{Parent=art,Position=pos,Size=size,BackgroundColor3=ink,BorderSizePixel=0,Rotation=rotation or 0,ZIndex=33})
-			item:SetAttribute("StudioFixedColor",true) addCorner(item,4) return item
+	refresh=function()
+		for _,connection in ipairs(cardConnections) do connection:Disconnect() end cardConnections={}
+		for _,card in ipairs(cardObjects) do card:Destroy() end cardObjects={}
+		local query=search.Text:lower() local filtered={}
+		for _,r in ipairs(PlanLibrary.list()) do if query=="" or (r.file.." "..r.buildName):lower():find(query,1,true) then filtered[#filtered+1]=r end end
+		local pages=math.max(1,math.ceil(#filtered/6)) page=math.clamp(page,1,pages)
+		pageLabel.Text=string.format("%d / %d  ·  %d планов",page,pages,#filtered) empty.Visible=#filtered==0
+		prev.Visible=page>1 nextPage.Visible=page<pages
+		for slot=1,6 do
+			local r=filtered[(page-1)*6+slot] if not r then break end
+			local column,row=(slot-1)%3,math.floor((slot-1)/3)
+			local selected=PlanLibrary.selection()==r.file
+			local card=button(area,"",UDim2.new(column/3,column*3, row/2,row*4),UDim2.new(1/3,-8,.5,-8),selected and "soft" or "panel") card.Name="PlanCard_"..slot card.ZIndex=73 cardObjects[#cardObjects+1]=card
+			local caption=label(card,r.file,UDim2.fromOffset(12,10),UDim2.new(1,-24,0,24),12,selected and "accent" or "text","medium") caption.TextWrapped=false caption.TextTruncate=Enum.TextTruncate.AtEnd caption.ZIndex=74
+			local source=label(card,r.buildName,UDim2.fromOffset(12,36),UDim2.new(1,-24,0,18),10,"muted") source.TextWrapped=false source.TextTruncate=Enum.TextTruncate.AtEnd source.ZIndex=74
+			label(card,tostring(r.count or 0).." блоков · "..tostring(r.operations or 0).." действий",UDim2.new(0,12,1,-34),UDim2.new(1,-24,0,24),10,"muted").ZIndex=74
+			cardConnections[#cardConnections+1]=card.MouseButton1Click:Connect(function() choose(r.file) end)
 		end
-		if which=="create" then
-			shape(UDim2.fromOffset(25,26),UDim2.fromOffset(56,56),-12)
-			shape(UDim2.fromOffset(91,16),UDim2.fromOffset(10,78),28)
-			shape(UDim2.fromOffset(77,3),UDim2.fromOffset(34,20),28)
-			for star=1,7 do shape(UDim2.fromOffset((star*41)%134,(star*29)%106),UDim2.fromOffset(3,3),45) end
-		else
-			shape(UDim2.fromOffset(21,80),UDim2.fromOffset(98,10))
-			shape(UDim2.fromOffset(21,66),UDim2.fromOffset(10,20))
-			shape(UDim2.fromOffset(109,66),UDim2.fromOffset(10,20))
-			shape(UDim2.fromOffset(65,21),UDim2.fromOffset(10,50))
-			shape(UDim2.fromOffset(51,13),UDim2.fromOffset(27,10),-45)
-			shape(UDim2.fromOffset(62,13),UDim2.fromOffset(27,10),45)
+	end
+	trackConn(close.MouseButton1Click:Connect(function() shade.Visible=false end))
+	trackConn(automatic.MouseButton1Click:Connect(function() choose("auto") end))
+	trackConn(prev.MouseButton1Click:Connect(function() page-=1 refresh() end))
+	trackConn(nextPage.MouseButton1Click:Connect(function() page+=1 refresh() end))
+	trackConn(search:GetPropertyChangedSignal("Text"):Connect(function() page=1 refresh() end))
+	trackConn(UI.planBtn.MouseButton1Click:Connect(function()
+		if _G.autobuildRunning or busySaving then setStatus("Сначала поставь строительство на паузу",true) return end
+		shade.Visible=true page=1 refresh()
+		task.defer(function() PlanLibrary.scan() if not unloaded and shade.Visible then refresh() end end)
+	end))
+	trackConn(mainFrame:GetPropertyChangedSignal("Visible"):Connect(function() if not mainFrame.Visible then shade.Visible=false end end))
+end
+local overviewRevision=0
+local overviewBounds=nil
+local function fitOverview()
+	if not overviewBounds then return end
+	local center,radius=overviewBounds.center,overviewBounds.radius
+	local aspect=math.max(.5,viewport.AbsoluteSize.X/math.max(1,viewport.AbsoluteSize.Y))
+	local distance=radius/math.min(1,aspect)
+	previewCamera.CFrame=CFrame.lookAt(center+Vector3.new(distance*.75,distance*.55,distance*.9),center) previewCamera.Focus=CFrame.new(center)
+end
+trackConn(viewport:GetPropertyChangedSignal("AbsoluteSize"):Connect(fitOverview))
+function UI.updatePreview(blocks)
+	overviewRevision+=1 local revision=overviewRevision
+	task.defer(function()
+		if unloaded or revision~=overviewRevision then return end
+		for _,p in ipairs(previewWorld:GetChildren()) do p:Destroy() end
+		overviewEmpty.Visible=#blocks==0
+		if #blocks==0 then overviewBounds=nil return end
+		local lo,hi=Vector3.new(math.huge,math.huge,math.huge),Vector3.new(-math.huge,-math.huge,-math.huge)
+		for _,b in ipairs(blocks) do
+			local a,c=b.centerPos-b.size/2,b.centerPos+b.size/2
+			lo=Vector3.new(math.min(lo.X,a.X),math.min(lo.Y,a.Y),math.min(lo.Z,a.Z)) hi=Vector3.new(math.max(hi.X,c.X),math.max(hi.Y,c.Y),math.max(hi.Z,c.Z))
 		end
-		cards[which]=card
+		local stride=math.max(1,math.ceil(#blocks/240))
+		for i=1,#blocks,stride do
+			local b=blocks[i]
+			create("Part",{Name="OverviewBlock",Parent=previewWorld,Anchored=true,CanCollide=false,CanTouch=false,CanQuery=false,Size=b.size,CFrame=CFrame.new(b.centerPos),Color=b.color,Material=b.material,Transparency=b.material==Enum.Material.Glass and .5 or 0})
+		end
+		overviewBounds={center=(lo+hi)/2,radius=math.max(6,(hi-lo).Magnitude)} fitOverview()
+	end)
+end
+for _,o in ipairs(gui:GetDescendants()) do if o:IsA("TextButton") then bindHover(o) end end
+refreshVisibility()
+return UI
+
+	end)()
+	local creator=View.creator
+	local editorTools=View.editorTools
+	local toolButtons=View.toolButtons
+	local toolNames=View.toolNames
+	local toolLabels=View.toolLabels
+	local sceneStats=View.sceneStats
+	local selectionStats=View.selectionStats
+	local toolHint=View.toolHint
+	local toCodeBtn=View.toCodeBtn
+	local toolOptions=View.toolOptions
+	local buildToggle=View.buildToggle
+	local sizeToggle=View.sizeToggle
+	local copyToggle=View.copyToggle
+	local overlapToggle=View.overlapToggle
+	local hexField=View.hexField
+	local swatch=View.swatch
+	local materialButton=View.materialButton
+	local materialList=View.materialList
+	local paintModeButton=View.paintModeButton
+	local collideToggle=View.collideToggle
+	local sprayField=View.sprayField
+	local sprayColorField=View.sprayColorField
+	local selectionCopy=View.selectionCopy
+	local selectionClear=View.selectionClear
+	local welcome=View.welcome
+	local cards=View.cards
+	local createModeBtn=View.createModeBtn
+	local loadModeBtn=View.loadModeBtn
+	local undoBtn=View.undoBtn
+	local redoBtn=View.redoBtn
+	local codeBtn=View.codeBtn
+	local moreBtn=View.moreBtn
+	local primary=View.primary
+	local extra=View.extra
+	local applyTheme=View.applyTheme
+	for material,choice in pairs(View.materialChoices) do
+		trackConn(choice.MouseButton1Click:Connect(function()
+			paintMaterial=material materialButton.Text="Материал: "..material.Name materialList.Visible=false
+		end))
 	end
 	local function blocked() return unloaded or _G.autobuildRunning or busySaving or sceneLoading or pendingContent~=nil end
 	local function uiHit(point)
+		if not mainFrame.Visible then return false end
 		local p=mainFrame.AbsolutePosition local s=mainFrame.AbsoluteSize
 		return point.X>=p.X and point.X<=p.X+s.X and point.Y>=p.Y and point.Y<=p.Y+s.Y
 	end
@@ -2877,7 +3449,8 @@ return H
 		return table.concat(records)
 	end
 	local function updateSceneStats()
-		sceneStats.Text=string.format("%d деталей · сохраняется автоматически",#collect(false))
+		sceneStats.Text=string.format("%d деталей · сохранено локально",#collect(false))
+		View.updatePreview(collect(false))
 		refreshSelection()
 	end
 	local function commit()
@@ -2929,18 +3502,9 @@ return H
 	end
 	local function syncVisibility()
 		local creating=mode=="create"
-		welcome.Visible=mode=="welcome"
-		creator.Visible=creating and not codeOpen
-		editorFrame.Visible=mode=="load" or (creating and codeOpen)
-		editorTools.Visible=creating
-		moreBtn.Visible=not creating
-		for _,b in ipairs(primary) do b.Visible=not creating end
-		for _,b in ipairs(extra) do b.Visible=(not creating and moreOpen) end
+		View.mode(mode,codeOpen,moreOpen)
 		btnNextChunk.Visible=not creating and _G.totalChunks~=nil and _G.totalChunks>1
-		moreBtn.Text=moreOpen and "Скрыть действия ▴" or "Ещё действия ▾"
-		codeBtn.Text=creating and (codeOpen and "Свойства" or "Код") or "Вставить"
-		createModeBtn.Text=creating and "✦ Творить •" or "✦ Творить"
-		loadModeBtn.Text=mode=="load" and "↑ Грузить •" or "↑ Грузить"
+
 		for _,part in ipairs(order) do
 			if part.Parent then
 				part.LocalTransparencyModifier=creating and 0 or 1 part.CanQuery=creating
@@ -2966,7 +3530,7 @@ return H
 		end
 		mode=nextMode codeOpen=false materialList.Visible=false
 		for _,tool in pairs(tools) do tool.Enabled=nextMode=="create" end
-		applyTheme(nextMode=="create" and "create" or "load")
+		applyTheme(nextMode=="load" and "load" or "create")
 		syncVisibility() renderTabs()
 		setStatus(nextMode=="create" and "Мастерская · R меняет режим инструмента · Ctrl+Z отменяет действие" or "Загрузи код → рассчитай план → проверь → строй")
 	end
@@ -2986,6 +3550,7 @@ return H
 	end
 	trackConn(undoBtn.MouseButton1Click:Connect(function() restore("undo") end))
 	trackConn(redoBtn.MouseButton1Click:Connect(function() restore("redo") end))
+	trackConn(View.homeBtn.MouseButton1Click:Connect(function() setMode("welcome") end))
 	trackConn(createModeBtn.MouseButton1Click:Connect(function() setMode("create") end))
 	trackConn(loadModeBtn.MouseButton1Click:Connect(function() setMode("load") end))
 	for which,card in pairs(cards) do trackConn(card.MouseButton1Click:Connect(function() setMode(which) end)) end
@@ -3012,6 +3577,7 @@ return H
 	trackConn(paintModeButton.MouseButton1Click:Connect(function()
 		local names={both="color",color="material",material="spray",spray="both"}
 		paintMode=names[paintMode]
+		View.paint(paintMode)
 		local titles={both="цвет + материал",color="только цвет",material="только материал",spray="текст на грани"}
 		paintModeButton.Text="Покраска: "..titles[paintMode]
 	end))
@@ -3079,8 +3645,9 @@ return H
 		if blocked() then releaseTool() return end
 		if mode~="create" then setMode("create") if mode~="create" then return end end
 		activeTool=name
+		codeOpen=false syncVisibility() View.tool(name)
 		toolHint.Text=hints[name]
-		for n,b in pairs(toolButtons) do b.Text=(n==name and "• " or "")..toolLabels[n] end
+		-- Responsive labels are handled by View.tool.
 		if equip then
 			local hum=LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
 			if hum and tools[name] then hum:EquipTool(tools[name]) end

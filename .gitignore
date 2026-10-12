@@ -5,3 +5,6 @@ AutobuildGithubKey-*.txt
 AutobuildData*.json*
 AutobuildStudioHistory*.json
 plan-*.json
+*.plan
+AutobuildPlanLibrary.json
+AutobuildAppearance.json
