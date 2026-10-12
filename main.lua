@@ -56,7 +56,7 @@ if isfile and readfile then
 		local clean, rejected={},0
 		for _, tab in ipairs(decoded) do
 			if type(tab)=="table" and type(tab.content)=="string" then
-				clean[#clean+1]={name=type(tab.name)=="string" and tab.name or "Build",content=tab.content}
+				clean[#clean+1]={name=type(tab.name)=="string" and tab.name or "Build",content=tab.content,id=type(tab.id)=="string" and tab.id or nil,placement=type(tab.placement)=="table" and tab.placement or nil,rotationPivot=type(tab.rotationPivot)=="table" and tab.rotationPivot or nil}
 			else rejected=rejected+1 end
 		end
 		if #clean>0 then tabsData=clean end
@@ -366,7 +366,13 @@ local function setEditorDisplay(value)
 end
 
 local function setBuildContent(value, keepRotationPivot)
-	if not keepRotationPivot then rotationPivot = nil end
+	local tab=tabsData[activeTabIndex]
+	if not keepRotationPivot then
+		rotationPivot=tab.content==value and tab.rotationPivot or nil
+		if type(rotationPivot)~="table" or type(rotationPivot.X)~="number" or type(rotationPivot.Z)~="number" then rotationPivot=nil end
+	end
+	tab.rotationPivot=rotationPivot
+	if _G.buildOffset then local p=_G.buildOffset tab.placement={p.X,p.Y,p.Z} end
 	_G.fullBuildString = value
 	tabsData[activeTabIndex].content = value
 	if StudioHooks.content then StudioHooks.content(value) end
@@ -556,7 +562,11 @@ local function renderTabs()
 
 		tBtn.MouseButton1Click:Connect(function()
 			if _G.autobuildRunning or busySaving then return end
-	activeTabIndex = i
+	local previous=tabsData[activeTabIndex] local p=_G.buildOffset or Vector3.zero
+			previous.placement={p.X,p.Y,p.Z}
+			activeTabIndex = i
+			if StudioHooks.restorePlacement then StudioHooks.restorePlacement() else _G.buildOffset=Vector3.zero end
+			if StudioHooks.hidePreview then StudioHooks.hidePreview() end
 			setBuildContent(tab.content)
 			renderTabs()
 		end)
@@ -582,6 +592,7 @@ local function renderTabs()
 					activeTabIndex = math.max(1, activeTabIndex - 1)
 				end
 			end
+			if StudioHooks.restorePlacement then StudioHooks.restorePlacement() end
 			setBuildContent(tabsData[activeTabIndex].content)
 			saveData()
 			renderTabs()
@@ -596,6 +607,8 @@ addTabBtn.MouseButton1Click:Connect(function()
 	if _G.autobuildRunning or busySaving then return end
 	table.insert(tabsData, {name = "Build " .. (#tabsData + 1), content = ""})
 	activeTabIndex = #tabsData
+	_G.buildOffset=Vector3.zero
+	if StudioHooks.hidePreview then StudioHooks.hidePreview() end
 	setBuildContent("")
 	saveData()
 	renderTabs()
@@ -606,6 +619,7 @@ textBox:GetPropertyChangedSignal("Text"):Connect(function()
 	if _G.autobuildRunning or busySaving then setEditorDisplay(tabsData[activeTabIndex].content) return end
 	editorDisplayText = nil
 	rotationPivot = nil
+	tabsData[activeTabIndex].rotationPivot=nil
 	tabsData[activeTabIndex].content = textBox.Text
 	if StudioHooks.content then StudioHooks.content(textBox.Text) end
 	_G.fullBuildString = textBox.Text
@@ -758,9 +772,10 @@ local function cleanupVisuals(preserveOffset)
 	if not preserveOffset then
 		_G.buildOffset = Vector3.zero
 	end
-	btnImport.Text = "ПРЕДПРОСМОТР"
+	btnImport.Text = "Предпросмотр"
 end
 
+StudioHooks.hidePreview=function() cleanupVisuals(true) end
 local function showVisuals()
 	local buildString = (_G.fullBuildString and _G.fullBuildString ~= "") and _G.fullBuildString or textBox.Text
 	if buildString == "" then return end
@@ -817,6 +832,7 @@ local function showVisuals()
 
 	handles.MouseButton1Down:Connect(function()
 		if _G.autobuildRunning then return end
+		if StudioHooks.beforeTransform then local ok,message=StudioHooks.beforeTransform() if not ok then setStatus(message,true) return end end
 		isDragging = true
 		startPositions = {}
 		for _, child in pairs(visualFolder:GetChildren()) do
@@ -837,6 +853,8 @@ local function showVisuals()
 			end
 		end
 		_G.buildOffset = centerPart.Position - originalCenterPos
+	tabsData[activeTabIndex].placement={_G.buildOffset.X,_G.buildOffset.Y,_G.buildOffset.Z}
+	saveData()
 	invalidatePreparedPlan()
 	end)
 
@@ -848,19 +866,21 @@ local function showVisuals()
 	visualsShowing = true
 	_G.visualsEnabled = true
 	_G.buildOffset = savedOffset
-	btnImport.Text = "REMOVE"
+	btnImport.Text = "Скрыть preview"
+	if StudioHooks.preview then StudioHooks.preview() end
 end
 
 btnImport.MouseButton1Click:Connect(function()
 	if _G.autobuildRunning or busySaving then return end
 	if visualsShowing then
-		cleanupVisuals(false)
+		cleanupVisuals(true)
 	else
 		showVisuals()
 	end
 end)
 
 btnToMe.MouseButton1Click:Connect(function()
+	if StudioHooks.beforeTransform then local ok,message=StudioHooks.beforeTransform() if not ok then setStatus(message,true) return end end
 	if _G.autobuildRunning or busySaving then return end
 	if not visualsShowing or not centerPart or not visualFolder then return end
 	local char = LocalPlayer.Character
@@ -877,10 +897,13 @@ btnToMe.MouseButton1Click:Connect(function()
 		end
 	end
 	_G.buildOffset = centerPart.Position - originalCenterPos
+	tabsData[activeTabIndex].placement={_G.buildOffset.X,_G.buildOffset.Y,_G.buildOffset.Z}
+	saveData()
 	invalidatePreparedPlan()
 end)
 
 btnSnap.MouseButton1Click:Connect(function()
+	if StudioHooks.beforeTransform then local ok,message=StudioHooks.beforeTransform() if not ok then setStatus(message,true) return end end
 	if _G.autobuildRunning or busySaving then return end
 	_G.buildOffset = snapBuildOffset(_G.buildOffset or Vector3.zero)
 	showVisuals()
@@ -892,6 +915,7 @@ end)
 local function rotateBuild(angle)
 	local buildString = (_G.fullBuildString and _G.fullBuildString ~= "") and _G.fullBuildString or textBox.Text
 	if buildString == "" or _G.autobuildRunning or busySaving then return end
+	if StudioHooks.beforeTransform then local ok,message=StudioHooks.beforeTransform() if not ok then setStatus(message,true) return end end
 
 	local blocks, invalid = parseBlocks(buildString, Vector3.zero)
 	if #blocks == 0 or invalid > 0 then setStatus("Некорректное сохранение: " .. invalid, true) return end
@@ -956,7 +980,7 @@ local function rotateBuild(angle)
 	end
 
 	-- 4. Пересчет каждого блока с гарантией целостности сетки
-	local newBuildStr = ""
+	local rotatedRecords = {}
 	for _, b in ipairs(blocks) do
 		local minX_b = (b.centerPos.X - b.size.X / 2)
 		local maxX_b = (b.centerPos.X + b.size.X / 2)
@@ -1003,11 +1027,11 @@ local function rotateBuild(angle)
 		end
 		local spraysStr = #spraysList > 0 and "." .. table.concat(spraysList, "..") or ""
 
-		newBuildStr = newBuildStr .. string.format("|%s%s%s%.0f,%.0f,%.0f.%.6f,%.6f,%.6f%s.|",
+		rotatedRecords[#rotatedRecords+1] = string.format("|%s%s%s%.0f,%.0f,%.0f.%.6f,%.6f,%.6f%s.|",
 			colorHex, matSym, canColMarker, nSize.X, nSize.Y, nSize.Z, nCenterX, nCenterY, nCenterZ, spraysStr)
 	end
 
-	setBuildContent(newBuildStr, true)
+	setBuildContent(table.concat(rotatedRecords), true)
 	updateDefaultStats()
 
 	if visualsShowing then
@@ -1021,31 +1045,17 @@ btnRotNeg90.MouseButton1Click:Connect(function() rotateBuild(-90) end)
 
 btnPaste.MouseButton1Click:Connect(function()
 	if _G.autobuildRunning or busySaving then return end
-	local getClip = getclipboard or (syn and syn.get_clipboard) or (Clipboard and Clipboard.get)
-	local text = ""
-	if getClip then
-		local s, res = pcall(getClip)
-		if s and type(res) == "string" then text = res end
-	end
-	if text == "" then
-		btnPaste.Text = "EMPTY!"
-		task.wait(0.7)
-		btnPaste.Text = "ВСТАВИТЬ"
-		return
-	end
-
-	setBuildContent(text)
-	updateDefaultStats()
-	btnPaste.Text = "PASTED!"
-	task.wait(0.7)
-	btnPaste.Text = "ВСТАВИТЬ"
+	local reader=getclipboard or (syn and syn.get_clipboard) or (Clipboard and Clipboard.get)
+	local ok,value=false,nil
+	if reader then ok,value=pcall(reader) end
+	if not ok or type(value)~="string" or value=="" then setStatus("Буфер обмена пуст или недоступен",true) return end
+	cleanupVisuals(false) setBuildContent(value) updateDefaultStats()
+	if StudioHooks.controls then StudioHooks.controls() end
+	setStatus("Код вставлен")
 end)
-
 btnCopy.MouseButton1Click:Connect(function()
-	if not exportToClipboard(_G.fullBuildString or textBox.Text) then setStatus("Буфер обмена недоступен", true) return end
-	btnCopy.Text = "COPIED!"
-	task.wait(1)
-	btnCopy.Text = "КОПИРОВАТЬ"
+	local ok=exportToClipboard(_G.fullBuildString or textBox.Text)
+	setStatus(ok and "Код скопирован" or "Буфер обмена недоступен",not ok)
 end)
 
 btnClear.MouseButton1Click:Connect(function()
@@ -1937,6 +1947,7 @@ invalidatePreparedPlan=function()
 	local offset=snapBuildOffset(_G.buildOffset or Vector3.zero)
 	if text~=resumeSession.text or offset~=resumeSession.offset then
 		clearPlanPreview() resumeSession.previewInvalid=true
+		if StudioHooks.preview then StudioHooks.preview() end
 		btnStart.Text="СТРОИТЬ"
 	end
 end
@@ -2090,6 +2101,7 @@ local PlanLibrary=(function()
 local PlanLibrary={}
 local indexFile="AutobuildPlanLibrary.json"
 local rows,memory,choices={},{},{}
+local diskKnown={}
 local function safeFile(name)
 	return type(name)=="string" and #name<=220 and not name:find('[%c/\\<>:"|?*]') and name:sub(-5)==".plan" and not name:find("^%.")
 end
@@ -2103,7 +2115,12 @@ local function cleanName()
 end
 local function validStored(s)
 	if not (type(s)=="table" and s.version==4 and type(s.text)=="string" and type(s.items)=="table" and #s.items>0 and type(s.offset)=="table" and readPlanVector(s.offset)~=nil and type(s.name)=="string") then return false end
-	for _,item in ipairs(s.items) do if type(item)~="table" or type(item.index)~="number" or item.index%1~=0 or item.index<1 then return false end end
+	local seen={}
+	for _,item in ipairs(s.items) do
+		if type(item)~="table" or type(item.index)~="number" or item.index%1~=0 or item.index<1 or item.index>#s.items or seen[item.index] then return false end
+		seen[item.index]=true
+	end
+	if s.createdAt~=nil and (type(s.createdAt)~="number" or s.createdAt~=s.createdAt or math.abs(s.createdAt)>1000000000000) then return false end
 	if s.models~=nil then
 		if type(s.models)~="table" or #s.models~=#s.items then return false end
 		for _,m in ipairs(s.models) do
@@ -2119,7 +2136,12 @@ local function readStored(file)
 	if memory[file] then return memory[file] end
 	if not readfile then return nil end
 	local ok,data=pcall(function() return HttpService:JSONDecode(readfile(file)) end)
-	if ok and validStored(data) then memory[file]=data return data end
+	if ok and validStored(data) then
+		local blocks,invalid=parseBlocks(data.text,readPlanVector(data.offset))
+		if invalid>0 or #blocks~=#data.items then return nil end
+		if data.models then for i,m in ipairs(data.models) do if readPlanVector(m.pos)~=blocks[i].centerPos or readPlanVector(m.size)~=blocks[i].size then return nil end end end
+		diskKnown[file]=true memory[file]=data return data
+	end
 	return nil
 end
 local function persistIndex()
@@ -2141,7 +2163,7 @@ local function meta(file,s)
 	local models=s.models or {}
 	local step=math.max(1,math.ceil(#s.items/28))
 	for i=1,#s.items,step do local m=models[s.items[i].index] if m and readPlanVector(m.pos) then points[#points+1]=m.pos end end
-	return {file=file,buildName=s.buildName or file:sub(1,-6),createdAt=s.createdAt or 0,count=#s.items,operations=s.operations or 0,shapeSteps=s.shapeSteps or 0,helpers=s.helpers or 0,points=points,parentPlan=s.requestedTemplate~="auto" and s.requestedTemplate or nil}
+	return {file=file,buildId=s.buildId,buildName=s.buildName or file:sub(1,-6),createdAt=s.createdAt or 0,count=#s.items,operations=s.operations or 0,shapeSteps=s.shapeSteps or 0,helpers=s.helpers or 0,points=points,parentPlan=s.requestedTemplate~="auto" and s.requestedTemplate or nil}
 end
 local function add(file,s)
 	if not validStored(s) then return end
@@ -2319,6 +2341,272 @@ function PlanLibrary.prepare(targets,scene,options)
 	else plan.adaptation=description end
 	plan.name="По плану "..selected plan.appliedFrom=selected
 	return plan
+end
+
+-- Stable ownership is independent of tab names and world placement.
+local bindings={}
+local serial=0
+local function newIdentity()
+	local ok,id=pcall(function() return HttpService:GenerateGUID(false) end)
+	if ok and type(id)=="string" and #id>0 then return id end
+	serial+=1 return "build-"..tostring(os.time()).."-"..tostring(os.clock()).."-"..serial
+end
+function PlanLibrary.id()
+	local tab=tabsData[activeTabIndex]
+	if type(tab.id)~="string" or tab.id=="" then tab.id=newIdentity() end
+	return tab.id
+end
+function PlanLibrary.restorePlacement()
+	local tab=tabsData[activeTabIndex]
+	_G.buildOffset=snapBuildOffset(readPlanVector(tab.placement) or Vector3.zero)
+	local p=tab.rotationPivot
+	rotationPivot=type(p)=="table" and type(p.X)=="number" and type(p.Z)=="number" and p.X==p.X and p.Z==p.Z and math.abs(p.X)<=1000000 and math.abs(p.Z)<=1000000 and p or nil
+end
+StudioHooks.restorePlacement=PlanLibrary.restorePlacement
+PlanLibrary.restorePlacement()
+local legacyChoices=choices
+choices={}
+local index
+if isfile and readfile then pcall(function() if isfile(indexFile) then index=HttpService:JSONDecode(readfile(indexFile)) end end) end
+if type(index)=="table" and index.version==2 then
+	local known={} for _,r in ipairs(rows) do known[r.file]=true end
+	for _,r in ipairs(type(index.plans)=="table" and index.plans or {}) do
+		if type(r)=="table" and safeFile(r.file) and type(r.buildName)=="string" and (r.createdAt==nil or type(r.createdAt)=="number" and r.createdAt==r.createdAt) and not known[r.file] then rows[#rows+1]=r known[r.file]=true end
+	end
+	for id,file in pairs(type(index.choices)=="table" and index.choices or {}) do if type(id)=="string" and (file=="auto" or safeFile(file)) then choices[id]=file end end
+	for id,file in pairs(type(index.bindings)=="table" and index.bindings or {}) do if type(id)=="string" and safeFile(file) then bindings[id]=file end end
+end
+persistIndex=function()
+	if writefile then pcall(function() writefile(indexFile,HttpService:JSONEncode({version=2,plans=rows,choices=choices,bindings=bindings})) end) end
+end
+local names,ids={},{}
+for _,tab in ipairs(tabsData) do
+	names[tab.name]=(names[tab.name] or 0)+1
+	if type(tab.id)~="string" or tab.id=="" or ids[tab.id] then tab.id=newIdentity() end
+	ids[tab.id]=true
+end
+for _,tab in ipairs(tabsData) do
+	if names[tab.name]==1 then
+		if not choices[tab.id] and legacyChoices[tab.name] and legacyChoices[tab.name]~="auto" then choices[tab.id]=legacyChoices[tab.name] end
+		if not bindings[tab.id] then
+			for _,row in ipairs(PlanLibrary.list()) do
+				if row.buildName==tab.name and (not row.buildId or row.buildId==tab.id) and readStored(row.file) then
+					row.buildId=tab.id bindings[tab.id]=row.file break
+				end
+			end
+		end
+	end
+end
+persistIndex() saveData()
+local function owns(file,stored)
+	local id=PlanLibrary.id()
+	if stored.buildId then return stored.buildId==id end
+	for _,row in ipairs(rows) do if row.file==file then return row.buildId==id end end
+	return false
+end
+function PlanLibrary.selection()
+	local id=PlanLibrary.id()
+	return choices[id] and choices[id]~="auto" and choices[id] or bindings[id] or "auto"
+end
+function PlanLibrary.migrateHistory(data)
+	if type(data)~="table" then return end
+	local owners={}
+	local function note(name,id)
+		if type(name)~="string" or type(id)~="string" then return end
+		if owners[name] and owners[name]~=id then owners[name]=false elseif owners[name]==nil then owners[name]=id end
+	end
+	for _,tab in ipairs(tabsData) do note(tab.name,tab.id) end
+	for _,row in ipairs(rows) do note(row.buildName,row.buildId) end
+	local function migrate(state)
+		if type(state)~="table" or type(state.tabs)~="table" then return end
+		local counts={} for _,tab in ipairs(state.tabs) do if type(tab)=="table" and type(tab.name)=="string" then counts[tab.name]=(counts[tab.name] or 0)+1 end end
+		for _,tab in ipairs(state.tabs) do
+			if type(tab)=="table" and (tab.id==nil or tab.id=="") then tab.id=counts[tab.name]==1 and owners[tab.name] or newIdentity() end
+		end
+	end
+	migrate(data.current)
+	for _,stack in ipairs({data.undo or {},data.redo or {}}) do if type(stack)=="table" then for _,state in ipairs(stack) do migrate(state) end end end
+end
+function PlanLibrary.canTransform()
+	if _G.autobuildRunning then return false,"Сначала поставь строительство на паузу" end
+	if resumeSession then
+		for _,b in ipairs(resumeSession.blocks or {}) do
+			if b.creation or b.pendingResize or b.pendingCollision then return false,"Есть неподтверждённая команда. Сначала продолжи её проверку." end
+			for _,h in ipairs(b.work and b.work.helpers or {}) do if h.creation or h.brick and h.brick.Parent then return false,"Сначала заверши текущие вспомогательные блоки." end end
+		end
+	end
+	return true
+end
+StudioHooks.beforeTransform=PlanLibrary.canTransform
+function PlanLibrary.select(file)
+	if file~="auto" and not readStored(file) then return false,"Файл плана не найден или повреждён: "..tostring(file) end
+	if file==PlanLibrary.selection() then return true end
+	local ok,message=PlanLibrary.canTransform() if not ok then return false,message end
+	local id=PlanLibrary.id()
+	choices[id]=file=="auto" and nil or file
+	persistIndex()
+	if resumeSession and (not resumeSession.buildId or resumeSession.buildId==id) then
+		resumeSession.plan=nil resumeSession.planByIndex=nil resumeSession.previewInvalid=true resumeSession.renderedText=nil
+		clearPlanPreview()
+	end
+	if StudioHooks.controls then StudioHooks.controls() end
+	return true
+end
+local function turn(v,quarter)
+	if quarter==1 then return Vector3.new(-v.Z,v.Y,v.X)
+	elseif quarter==2 then return Vector3.new(-v.X,v.Y,-v.Z)
+	elseif quarter==3 then return Vector3.new(v.Z,v.Y,-v.X) end
+	return v
+end
+local function turnSize(size,quarter) return quarter%2==1 and Vector3.new(size.Z,size.Y,size.X) or size end
+local function turnFace(face,quarter)
+	local nextFace={[Enum.NormalId.Left]=Enum.NormalId.Front,[Enum.NormalId.Front]=Enum.NormalId.Right,[Enum.NormalId.Right]=Enum.NormalId.Back,[Enum.NormalId.Back]=Enum.NormalId.Left}
+	for _=1,quarter do face=nextFace[face] or face end return face
+end
+local function styleKey(model,quarter)
+	local sprays={}
+	for _,s in ipairs(model.sprays or {}) do sprays[#sprays+1]=tostring(turnFace(s.face,quarter or 0))..":"..encodeSpray(s.text or "")..":"..(s.colorHex or "FFFFFF"):upper() end
+	table.sort(sprays)
+	return colorHex(model.color).."/"..tostring(model.material).."/"..tostring(model.collide).."/"..table.concat(sprays,";")
+end
+local adaptOrder=PlanLibrary.order
+function PlanLibrary.match(stored,targets)
+	local models={}
+	local blocks,invalid=parseBlocks(stored.text,readPlanVector(stored.offset))
+	if invalid>0 or #blocks~=#targets or #stored.items~=#targets then return nil end
+	for i,b in ipairs(blocks) do models[i]={pos=b.centerPos,size=b.size,color=b.color,material=b.material,collide=b.canCollide,sprays=b.sprays} end
+	local seen={}
+	for _,entry in ipairs(stored.items) do if not models[entry.index] or seen[entry.index] then return nil end seen[entry.index]=true end
+	local to=bounds(targets)
+	local best
+	for quarter=0,3 do
+		local rotated={}
+		for i,m in ipairs(models) do rotated[i]={pos=turn(m.pos,quarter),size=turnSize(m.size,quarter)} end
+		local from=bounds(rotated)
+		local mapping={} local sameIndices=true
+		for i,m in ipairs(rotated) do
+			if geometrySignature(m.pos-from,m.size)~=geometrySignature(targets[i].pos-to,targets[i].size) then sameIndices=false break end
+		end
+		if sameIndices then for i in ipairs(rotated) do mapping[i]=i end
+		else
+			local buckets={}
+			for i,m in ipairs(targets) do local key=geometrySignature(m.pos-to,m.size) buckets[key]=buckets[key] or {} buckets[key][#buckets[key]+1]=i end
+			for i,m in ipairs(rotated) do
+				local bucket=buckets[geometrySignature(m.pos-from,m.size)]
+				if not bucket or #bucket==0 then mapping={} break end
+				local slot=1
+				for j,index in ipairs(bucket) do if styleKey(models[i],quarter)==styleKey(targets[index],0) then slot=j break end end
+				mapping[i]=table.remove(bucket,slot)
+			end
+		end
+		if #mapping==#targets then
+			local equal=true
+			for i,index in ipairs(mapping) do if styleKey(models[i],quarter)~=styleKey(targets[index],0) then equal=false break end end
+			local order={} for _,entry in ipairs(stored.items) do order[#order+1]=mapping[entry.index] end
+			local match={order=order,mapping=mapping,quarter=quarter,translation=to-from,equivalent=equal}
+			-- Stable record identity disambiguates symmetric geometry after rotation.
+			if sameIndices and equal then return match end
+			if not best or equal and not best.equivalent then best=match end
+		end
+	end
+	return best
+end
+function PlanLibrary.order(stored,targets)
+	local matched=PlanLibrary.match(stored,targets)
+	if matched then return matched.order,matched.quarter==0 and "Точное соответствие геометрии" or "Тот же маршрут · поворот "..(matched.quarter*90).."°",matched end
+	return adaptOrder(stored,targets)
+end
+savePreparedPlan=function(session,scene,bridges)
+	local selected=PlanLibrary.selection()
+	local old=selected~="auto" and readStored(selected)
+	local matched=old and PlanLibrary.match(old,session.models)
+	if old and owns(selected,old) and matched and matched.equivalent then
+		session.planFile=selected bindings[PlanLibrary.id()]=selected
+		persistIndex() setStatus("План закреплён: "..selected.." · положение и поворот проверены") return true
+	end
+	local stored=pack(session,scene,bridges) stored.buildId=PlanLibrary.id() stored.libraryVersion=2
+	local file=reserveName(cleanName()) local saved=false
+	if writefile then saved=pcall(function() writefile(file,HttpService:JSONEncode(stored)) end) end
+	if saved then diskKnown[file]=true end
+	add(file,stored)
+	bindings[stored.buildId]=file choices[stored.buildId]=nil session.planFile=file
+	persistIndex()
+	if StudioHooks.controls then StudioHooks.controls() end
+	setStatus(saved and "План постройки: "..file or "План в памяти: "..file.."; файл не записан",not saved)
+	return saved
+end
+loadPreparedPlan=function(session,scene,bridges)
+	local file=PlanLibrary.selection()
+	if file=="auto" then
+		local ok,legacy=pcall(exactReader,session,scene,bridges)
+		if ok and legacy then session.plan=legacy savePreparedPlan(session,scene,bridges) return legacy end
+		return nil
+	end
+	local stored=readStored(file)
+	if not stored or not owns(file,stored) then return nil end
+	exactTarget=file
+	local ok,plan=pcall(exactReader,session,scene,bridges)
+	exactTarget=nil
+	return ok and plan or nil
+end
+PlanLibrary.prepare=function(targets,scene,options)
+	local file=PlanLibrary.selection()
+	if file=="auto" then return Planner.prepare(targets,scene,options) end
+	local stored=readStored(file)
+	if not stored then
+		setStatus("Закреплённый файл недоступен; рассчитываю новый план для этой постройки",true)
+		return Planner.prepare(targets,scene,options)
+	end
+	if owns(file,stored) and not PlanLibrary.match(stored,targets) then
+		setStatus("Геометрия постройки изменена; рассчитываю новую версию её плана")
+		return Planner.prepare(targets,scene,options)
+	end
+	local order,description=PlanLibrary.order(stored,targets)
+	if not order then error("Выбранный план повреждён; выбери другой файл",0) end
+	setStatus("План "..file.." · "..description)
+	local ok,plan=pcall(Planner.prepareOrdered,targets,scene,options,order)
+	if not ok then
+		if options.cancelled and options.cancelled() then error("Подготовка остановлена",0) end
+		setStatus("Проверка маршрута выявила препятствие; рассчитываю безопасный порядок")
+		plan=Planner.prepare(targets,scene,options)
+	end
+	plan.name="План "..file plan.appliedFrom=file plan.adaptation=description
+	return plan
+end
+function PlanLibrary.preview()
+	if not visualFolder or _G.autobuildRunning then return end
+	local text=_G.fullBuildString or textBox.Text local offset=snapBuildOffset(_G.buildOffset or Vector3.zero)
+	if resumeSession and resumeSession.buildId==PlanLibrary.id() and resumeSession.text==text and resumeSession.offset==offset and resumeSession.plan then drawPreparedPlan(resumeSession) return end
+	local file=PlanLibrary.selection() local stored=file~="auto" and readStored(file)
+	if not stored then return end
+	local blocks,invalid=parseBlocks(text,offset) if invalid>0 or #blocks==0 then return end
+	local models={}
+	for i,b in ipairs(blocks) do models[i]={pos=b.centerPos,size=b.size,color=b.color,material=b.material,collide=b.canCollide,sprays=b.sprays} end
+	local matched=PlanLibrary.match(stored,models) if not matched then return end
+	local view={text=text,offset=offset,models=models,blocks=blocks,done={},plan={items={}}}
+	for rank,index in ipairs(matched.order) do
+		local saved=stored.items[rank] local item={index=index,helpers={}}
+		local sourceIndex=saved.source and not saved.source.external and type(saved.source.id)=="string" and saved.source.id:match("^t:(%d+)$")
+		if sourceIndex then item.source=models[matched.mapping[tonumber(sourceIndex)]] end
+		view.plan.items[#view.plan.items+1]=item
+	end
+	-- This shows bound order only; live helpers and outside sources are revalidated
+	-- during preparation, never replayed from the old world coordinates.
+	drawPreparedPlan(view)
+end
+StudioHooks.preview=PlanLibrary.preview
+local discover=PlanLibrary.scan
+PlanLibrary.scan=function()
+	-- Explicit refresh rereads changed existing files, not just new filenames.
+	if isfile and readfile then
+		for file in pairs(memory) do local ok,exists=pcall(isfile,file) if diskKnown[file] or ok and exists then memory[file]=nil end end
+		for _,row in ipairs(rows) do
+			local stored=readStored(row.file)
+			row.unavailable=stored==nil
+			if stored then row.count=#stored.items row.operations=stored.operations or 0 end
+		end
+	end
+	discover()
 end
 
 return PlanLibrary
@@ -2668,7 +2956,7 @@ local function executeBlock(data,index,session)
 	return true
 end
 local function runBuilderEngine(buildString,offset,prepareOnly)
-	if not resumeSession or resumeSession.text~=buildString or resumeSession.offset~=offset then
+	if not resumeSession or resumeSession.buildId~=PlanLibrary.id() or resumeSession.text~=buildString or resumeSession.offset~=offset then
 		if resumeSession then
 			for helper in pairs(resumeSession.helpers or {}) do if helper.Parent then return false,"Остались временные блоки предыдущей стройки. Продолжите её для удаления." end end
 			for _,old in ipairs(resumeSession.blocks) do
@@ -2679,7 +2967,7 @@ local function runBuilderEngine(buildString,offset,prepareOnly)
 		end
 		local blocks,invalid=parseBlocks(buildString,offset)
 		if invalid>0 or #blocks==0 then return false,"Некорректные данные постройки" end
-		resumeSession={text=buildString,offset=offset,blocks=blocks,done={},models={},ids={},instances={},nextWorld=0,helpers={},actual={creates=0,shapes=0,deletes=0}}
+		resumeSession={buildId=PlanLibrary.id(),text=buildString,offset=offset,blocks=blocks,done={},models={},ids={},instances={},nextWorld=0,helpers={},actual={creates=0,shapes=0,deletes=0}}
 		for i,data in ipairs(blocks) do resumeSession.models[i]=targetModel(data,i) end
 	end
 	local session=resumeSession
@@ -2817,12 +3105,23 @@ function H.valid(s)
 	if type(s.active)~="number" or s.active%1~=0 or s.active<1 or s.active>#s.tabs then return false end
 	for _,t in ipairs(s.tabs) do
 		if type(t)~="table" or type(t.name)~="string" or type(t.content)~="string" then return false end
+		if t.id~=nil and (type(t.id)~="string" or #t.id>200) then return false end
+		if t.rotationPivot~=nil then
+			if type(t.rotationPivot)~="table" then return false end
+			for _,k in ipairs({"X","Z"}) do local n=t.rotationPivot[k] if type(n)~="number" or n~=n or math.abs(n)>1000000 then return false end end
+		end
+		if t.placement~=nil then
+			if type(t.placement)~="table" or #t.placement~=3 then return false end
+			for _,n in ipairs(t.placement) do if type(n)~="number" or n~=n or math.abs(n)>1000000 then return false end end
+		end
 	end
 	return true
 end
 function H.clone(s)
 	local next={tabs={},active=s.active}
-	for i,t in ipairs(s.tabs) do next.tabs[i]={name=t.name,content=t.content} end
+	for i,t in ipairs(s.tabs) do
+		next.tabs[i]={id=t.id,name=t.name,content=t.content,rotationPivot=t.rotationPivot and {X=t.rotationPivot.X,Z=t.rotationPivot.Z} or nil,placement=t.placement and {t.placement[1],t.placement[2],t.placement[3]} or nil}
+	end
 	return next
 end
 function H.size(s)
@@ -2914,7 +3213,8 @@ return H
 	local baseline=snapshot()
 	if isfile and readfile then
 		pcall(function()
-			if isfile(historyFile) then History.load(HttpService:JSONDecode(readfile(historyFile)),baseline) end
+			if isfile(historyFile) then local recovered=HttpService:JSONDecode(readfile(historyFile))
+				PlanLibrary.migrateHistory(recovered) History.load(recovered,baseline) end
 		end)
 	end
 	local function persistHistory()
@@ -3286,6 +3586,7 @@ trackConn(UserInputService.InputBegan:Connect(function(input)
 	if input.KeyCode==Enum.KeyCode.RightShift and not UserInputService:GetFocusedTextBox() then mainFrame.Visible=not mainFrame.Visible end
 end))
 function UI.editor(text)
+	if StudioHooks.controls then StudioHooks.controls() end
 	local lines=1 local longest=0
 	for l in (text.."\n"):gmatch("([^\n]*)\n") do longest=math.max(longest,#l) end
 	for _ in text:gmatch("\n") do lines+=1 end
@@ -3298,6 +3599,13 @@ function UI.editor(text)
 	local count=0 for _ in (_G.fullBuildString or text):gmatch("|[^|]+|") do count+=1 end
 	recordBadge.Text=count.." деталей"
 end
+function UI.controls()
+	UI.planBtn.Text="План: "..(PlanLibrary.selection()=="auto" and "Авто" or PlanLibrary.selection())
+	btnImport.Text=visualsShowing and "Скрыть preview" or "Предпросмотр"
+	btnPaste.Text="Вставить" btnCopy.Text="Копировать"
+	btnRot90.Text="+90°" btnRot180.Text="180°" btnRotNeg90.Text="−90°"
+end
+StudioHooks.controls=UI.controls
 StudioHooks.editor=UI.editor UI.editor(textBox.Text)
 local function responsive()
 	local width=mainFrame.Size.X.Offset
@@ -3343,20 +3651,26 @@ do
 	local panel=create("Frame",{Parent=shade,Position=UDim2.fromOffset(100,18),Size=UDim2.new(1,-118,1,-36),BackgroundColor3=C_GRAY,ZIndex=71}) skin(panel,"deep") corners(panel,10) stroke(panel)
 	label(panel,"Библиотека планов",UDim2.fromOffset(20,12),UDim2.new(1,-70,0,30),19,"text","strong").ZIndex=72
 	local close=button(panel,"×",UDim2.new(1,-44,0,14),UDim2.fromOffset(28,28),"panel") close.ZIndex=72
-	local search=field(panel,"",UDim2.fromOffset(20,54),UDim2.new(1,-162,0,34)) search.Name="PlanSearch" search.PlaceholderText="Найти по названию…" search.ZIndex=72
-	local automatic=button(panel,"Авто",UDim2.new(1,-132,0,54),UDim2.fromOffset(112,34),"soft") automatic.ZIndex=72
-	label(panel,"Шаблон задаёт порядок. Геометрия и безопасность проверяются заново.",UDim2.fromOffset(20,96),UDim2.new(1,-40,0,28),10,"muted").ZIndex=72
+	local search=field(panel,"",UDim2.fromOffset(20,54),UDim2.new(1,-250,0,34)) search.Name="PlanSearch" search.PlaceholderText="Найти по названию…" search.ZIndex=72
+	local reload=button(panel,"Обновить",UDim2.new(1,-222,0,54),UDim2.fromOffset(92,34),"deep") reload.ZIndex=72
+	local automatic=button(panel,"Свой план",UDim2.new(1,-122,0,54),UDim2.fromOffset(102,34),"soft") automatic.ZIndex=72
+	local message=label(panel,"План закрепляется за этой постройкой и поворачивается вместе с ней.",UDim2.fromOffset(20,96),UDim2.new(1,-40,0,28),10,"muted") message.Name="PlanChoiceMessage" message.ZIndex=72
 	local area=create("Frame",{Parent=panel,Position=UDim2.fromOffset(20,132),Size=UDim2.new(1,-40,1,-198),BackgroundTransparency=1,ZIndex=72})
 	local empty=label(area,"Пока нет планов.\nПервый сохранится при начале строительства.",UDim2.fromOffset(0,20),UDim2.new(1,0,0,80),13,"muted") empty.Name="PlansEmpty" empty.ZIndex=73 empty.TextXAlignment=Enum.TextXAlignment.Center
 	local prev=button(panel,"←",UDim2.new(0,20,1,-48),UDim2.fromOffset(38,30),"panel") prev.ZIndex=72
 	local nextPage=button(panel,"→",UDim2.new(1,-58,1,-48),UDim2.fromOffset(38,30),"panel") nextPage.ZIndex=72
 	local pageLabel=label(panel,"",UDim2.new(.5,-140,1,-48),UDim2.fromOffset(280,30),11,"muted") pageLabel.ZIndex=72 pageLabel.TextXAlignment=Enum.TextXAlignment.Center
 	local page,cardObjects,cardConnections=1,{},{}
+	local generation=0
 	local refresh
 	local function choose(file)
 		local ok,message=PlanLibrary.select(file)
-		if not ok then setStatus(message,true) return end
-		shade.Visible=false UI.planBtn.Text="План: "..(file=="auto" and "Авто" or file)
+		if not ok then
+			local detail=message or "План не выбран"
+			panel:FindFirstChild("PlanChoiceMessage").Text=detail setStatus(detail,true) return
+		end
+		generation+=1 shade.Visible=false UI.controls()
+		if StudioHooks.preview then StudioHooks.preview() end
 		setStatus(file=="auto" and "План будет выбран автоматически" or "Шаблон: "..file.." · пересчитается перед строительством")
 	end
 	refresh=function()
@@ -3373,20 +3687,32 @@ do
 			local selected=PlanLibrary.selection()==r.file
 			local card=button(area,"",UDim2.new(column/3,column*3, row/2,row*4),UDim2.new(1/3,-8,.5,-8),selected and "soft" or "panel") card.Name="PlanCard_"..slot card.ZIndex=73 cardObjects[#cardObjects+1]=card
 			local caption=label(card,r.file,UDim2.fromOffset(12,10),UDim2.new(1,-24,0,24),12,selected and "accent" or "text","medium") caption.TextWrapped=false caption.TextTruncate=Enum.TextTruncate.AtEnd caption.ZIndex=74
-			local source=label(card,r.buildName,UDim2.fromOffset(12,36),UDim2.new(1,-24,0,18),10,"muted") source.TextWrapped=false source.TextTruncate=Enum.TextTruncate.AtEnd source.ZIndex=74
+			local source=label(card,r.unavailable and "Файл недоступен/повреждён" or r.buildName,UDim2.fromOffset(12,36),UDim2.new(1,-24,0,18),10,"muted") source.TextWrapped=false source.TextTruncate=Enum.TextTruncate.AtEnd source.ZIndex=74
 			label(card,tostring(r.count or 0).." блоков · "..tostring(r.operations or 0).." действий",UDim2.new(0,12,1,-34),UDim2.new(1,-24,0,24),10,"muted").ZIndex=74
 			cardConnections[#cardConnections+1]=card.MouseButton1Click:Connect(function() choose(r.file) end)
 		end
 	end
-	trackConn(close.MouseButton1Click:Connect(function() shade.Visible=false end))
+	trackConn(close.MouseButton1Click:Connect(function() generation+=1 shade.Visible=false end))
 	trackConn(automatic.MouseButton1Click:Connect(function() choose("auto") end))
 	trackConn(prev.MouseButton1Click:Connect(function() page-=1 refresh() end))
 	trackConn(nextPage.MouseButton1Click:Connect(function() page+=1 refresh() end))
 	trackConn(search:GetPropertyChangedSignal("Text"):Connect(function() page=1 refresh() end))
+	local function rescan()
+		generation+=1 local request=generation
+		message.Text="Читаю файлы планов…"
+		task.defer(function()
+			PlanLibrary.scan()
+			if unloaded or not shade.Visible or request~=generation then return end
+			-- A rescan is explicitly requested; choosing a card cancels its redraw.
+			refresh() message.Text="Выбери план. Для другой постройки сохранится отдельная привязанная копия."
+		end)
+	end
+	trackConn(reload.MouseButton1Click:Connect(rescan))
 	trackConn(UI.planBtn.MouseButton1Click:Connect(function()
-		if _G.autobuildRunning or busySaving then setStatus("Сначала поставь строительство на паузу",true) return end
-		shade.Visible=true page=1 refresh()
-		task.defer(function() PlanLibrary.scan() if not unloaded and shade.Visible then refresh() end end)
+		generation+=1 shade.Visible=true page=1 refresh()
+		message.Text=_G.autobuildRunning and "Можно просмотреть планы. Для смены сначала поставь стройку на паузу." or "Выбери план; поворот и перемещение сохраняют его привязку."
+		-- Do not destroy selectable cards in a background scan while clicking.
+		if #PlanLibrary.list()==0 then rescan() end
 	end))
 	trackConn(mainFrame:GetPropertyChangedSignal("Visible"):Connect(function() if not mainFrame.Visible then shade.Visible=false end end))
 end
@@ -3634,7 +3960,8 @@ return UI
 		tabsData=state.tabs activeTabIndex=state.active
 		_G.buildOffset=Vector3.zero loadedContent=nil
 		cleanupVisuals(true)
-		setBuildContent(tabsData[activeTabIndex].content) renderTabs() updateDefaultStats()
+		if StudioHooks.restorePlacement then StudioHooks.restorePlacement() end
+			setBuildContent(tabsData[activeTabIndex].content) renderTabs() updateDefaultStats()
 		baseline=snapshot() mutedHistory=false persistHistory()
 		setStatus(direction=="undo" and "Действие отменено" or "Действие повторено")
 	end
