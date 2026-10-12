@@ -17,7 +17,7 @@ local LocalPlayer = Players.LocalPlayer
 local unloaded = false
 local busySaving = false
 local StudioHooks = {}
-local resumeSession = nil
+local resumeSession = type(_G.AUTOBUILD_RESUME)=="table" and _G.AUTOBUILD_RESUME.version==2 and _G.AUTOBUILD_RESUME.job==game.JobId and _G.AUTOBUILD_RESUME.session or nil
 local invalidatePreparedPlan=function() end
 _G.autobuildRunning = false
 _G.stopautobuild = false
@@ -515,7 +515,7 @@ local function updateDefaultStats()
 end
 
 btnLog.MouseButton1Click:Connect(function()
-	local text="Autobuild Studio v5 / ORBIT\n"..table.concat(diagnosticLog,"\n")
+	local text="Autobuild Studio v5 / ORBIT · recovery-6\n"..table.concat(diagnosticLog,"\n")
 	if storageError then text=text.."\nStorage: "..storageError end
 	if copyText(text) then setStatus("Диагностика скопирована") else setStatus("Буфер обмена недоступен",true) end
 end)
@@ -1268,7 +1268,8 @@ end
 local function changes(initial,target,countOnly)
 	local lo,hi=bounds(initial)
 	local tlo,thi=bounds(target)
-	local ops,count={},0
+	local ops,count=nil,0
+	if not countOnly then ops={} end
 	for _,d in ipairs(dirs) do
 		local delta=(d.sign>0 and thi[d.axis]-hi[d.axis] or tlo[d.axis]-lo[d.axis])
 		if math.abs(delta-math.round(delta))>.005 then return nil end
@@ -1279,10 +1280,10 @@ local function changes(initial,target,countOnly)
 	return ops,count
 end
 P.changes=changes
-local function makeRecipe(initial,target,source,kind,face,helpers)
+local function makeRecipe(initial,target,source,kind,face,helpers,styling)
 	local _,steps=changes(initial,target,true)
 	if not steps or steps>20000 then return nil end
-	local styling=styleCost(source,target)
+	if styling==nil then styling=styleCost(source,target) end
 	if not styling then return nil end
 	local helperCount=helpers and #helpers or 0
 	return {kind=kind,initial=initial,target=target,source=source,face=face,helpers=helpers or {},shapeSteps=steps,styleSteps=styling,operations=(kind=="reuse" and 0 or 1)+steps+styling+helperCount*2}
@@ -1290,13 +1291,14 @@ end
 P.recipe=makeRecipe
 function P.baselines(target)
 	local result={}
+	local styling=styleCost(nil,target)
 	local lo,hi=bounds(target)
 	-- Every detailed corner has the same step count; different corners can
 	-- avoid obstructions during intermediate growth.
 	for x=0,1 do for y=0,1 do for z=0,1 do
 		local position=Vector3.new(x==0 and lo.X+.5 or hi.X-.5,y==0 and lo.Y+.5 or hi.Y-.5,z==0 and lo.Z+.5 or hi.Z-.5)
 		if math.abs(position.X%1-.5)<.005 and math.abs(position.Y%1-.5)<.005 and math.abs(position.Z%1-.5)<.005 then
-			local r=makeRecipe({pos=position,size=Vector3.new(1,1,1)},target,nil,"detailed")
+			local r=makeRecipe({pos=position,size=Vector3.new(1,1,1)},target,nil,"detailed",nil,nil,styling)
 			if r then result[#result+1]=r end
 		end
 	end end end
@@ -1307,7 +1309,7 @@ function P.baselines(target)
 		return {lower,lower+4}
 	end
 	for _,x in ipairs(options(target.pos.X)) do for _,y in ipairs(options(target.pos.Y)) do for _,z in ipairs(options(target.pos.Z)) do
-		local r=makeRecipe({pos=Vector3.new(x,y,z),size=Vector3.new(4,4,4)},target,nil,"normal")
+		local r=makeRecipe({pos=Vector3.new(x,y,z),size=Vector3.new(4,4,4)},target,nil,"normal",nil,nil,styling)
 		if r then result[#result+1]=r end
 	end end end
 	table.sort(result,function(a,b) return a.operations<b.operations end)
@@ -1316,20 +1318,21 @@ end
 function P.copies(source,target,bridges)
 	local result={}
 	if source.eligible==false then return result end
-	if not styleCost(source,target) then return result end
+	local styling=styleCost(source,target)
+	if not styling then return result end
 	for _,d in ipairs(dirs) do
 		-- Conservative approach envelope: both the block centre and the hit
 		-- point must be reachable without relying on an unverified range bypass.
 		if source.size[d.axis]/2>39.8 then continue end
 		local initial={pos=source.pos+d.unit*source.size[d.axis],size=source.size}
-		local recipe=makeRecipe(initial,target,source,"clone",d.face)
+		local recipe=makeRecipe(initial,target,source,"clone",d.face,nil,styling)
 		if recipe then result[#result+1]=recipe end
 		if bridges then
 			local helpers={}
 			for extra=1,2 do
 				helpers[#helpers+1]={pos=initial.pos,size=initial.size}
 				initial={pos=initial.pos+d.unit*source.size[d.axis],size=source.size}
-				local r=makeRecipe(initial,target,source,"bridge",d.face,table.clone(helpers))
+				local r=makeRecipe(initial,target,source,"bridge",d.face,table.clone(helpers),styling)
 				if r then result[#result+1]=r end
 			end
 		end
@@ -1343,12 +1346,57 @@ local function intersects(a,b)
 	return ahi.X>blo.X+.005 and bhi.X>alo.X+.005 and ahi.Y>blo.Y+.005 and bhi.Y>alo.Y+.005 and ahi.Z>blo.Z+.005 and bhi.Z>alo.Z+.005
 end
 P.intersects=intersects
-local function safeBox(box,target,obstacles,exclude,strict)
+-- Exact broad phase for immutable preparation snapshots. Every candidate still
+-- passes the original AABB and intermediate-face checks. Large boxes fall back
+-- to the complete list, so index limits cannot hide an obstacle.
+local Spatial={}
+Spatial.__index=Spatial
+local function cells(model)
+	local lo,hi=bounds(model)
+	local x1,y1,z1=math.floor(lo.X/32),math.floor(lo.Y/32),math.floor(lo.Z/32)
+	local x2,y2,z2=math.floor(hi.X/32),math.floor(hi.Y/32),math.floor(hi.Z/32)
+	local count=(x2-x1+1)*(y2-y1+1)*(z2-z1+1)
+	if count~=count or count==math.huge then return nil end
+	return x1,y1,z1,x2,y2,z2,count
+end
+function Spatial.new(models)
+	local self=setmetatable({models={},buckets={},large={},marks={},tick=0},Spatial)
+	for _,m in ipairs(models) do self:add(m) end return self
+end
+function Spatial:add(model)
+	local id=#self.models+1 self.models[id]=model
+	local x1,y1,z1,x2,y2,z2,count=cells(model)
+	if not x1 or count>512 then self.large[#self.large+1]=id return end
+	for x=x1,x2 do
+		local bx=self.buckets[x] if not bx then bx={} self.buckets[x]=bx end
+		for y=y1,y2 do
+			local by=bx[y] if not by then by={} bx[y]=by end
+			for z=z1,z2 do local bucket=by[z] if not bucket then bucket={} by[z]=bucket end bucket[#bucket+1]=id end
+		end
+	end
+end
+function Spatial:query(model)
+	local x1,y1,z1,x2,y2,z2,count=cells(model)
+	if not x1 or count>4096 then return self.models end
+	self.tick+=1 local stamp=self.tick local result={}
+	local function append(id)
+		if self.marks[id]~=stamp then self.marks[id]=stamp result[#result+1]=self.models[id] end
+	end
+	for _,id in ipairs(self.large) do append(id) end
+	for x=x1,x2 do
+		local bx=self.buckets[x]
+		if bx then for y=y1,y2 do local by=bx[y] if by then for z=z1,z2 do local bucket=by[z] if bucket then for _,id in ipairs(bucket) do append(id) end end end end end end
+	end
+	return result
+end
+P.spatial=Spatial.new
+local function safeBox(box,target,obstacles,exclude,strict,index)
 	local tlo,thi=bounds(target)
 	local lo,hi=bounds(box)
-	for _,other in ipairs(obstacles) do
+	for _,other in ipairs(index and index:query(box) or obstacles) do
+		if other.reservedTarget and other.reservedTarget==target.id then continue end
 		if other.id~=exclude and intersects(box,other) then
-			if strict then return false end
+			if strict or other.reservedTarget then return false end
 			local olo,ohi=bounds(other)
 			-- Intended overlap in the final data is preserved, but a transient
 			-- volume may never intersect an obstacle outside the final bounds.
@@ -1361,20 +1409,24 @@ local function safeBox(box,target,obstacles,exclude,strict)
 end
 P.safeBox=safeBox
 local permutations={{"X","Y","Z"},{"X","Z","Y"},{"Y","X","Z"},{"Y","Z","X"},{"Z","X","Y"},{"Z","Y","X"}}
-function P.compile(recipe,obstacles,allTargets,exclude,checkpoint)
+function P.compile(recipe,obstacles,allTargets,exclude,checkpoint,obstacleIndex,targetIndex)
 	if recipe.kind=="bridge" then
 		for _,helper in ipairs(recipe.helpers) do
-			if not safeBox(helper,recipe.target,obstacles,nil,true) or not safeBox(helper,recipe.target,allTargets,nil,true) then return nil end
+			if not safeBox(helper,recipe.target,obstacles,nil,true,obstacleIndex) or not safeBox(helper,recipe.target,allTargets,nil,true,targetIndex) then return nil end
 		end
 	end
 	local ilo,ihi=bounds(recipe.initial) local tlo,thi=bounds(recipe.target)
 	local lo=Vector3.new(math.min(ilo.X,tlo.X),math.min(ilo.Y,tlo.Y),math.min(ilo.Z,tlo.Z))
 	local hi=Vector3.new(math.max(ihi.X,thi.X),math.max(ihi.Y,thi.Y),math.max(ihi.Z,thi.Z))
 	local envelope={pos=(lo+hi)/2,size=hi-lo}
-	local relevant={} for _,other in ipairs(obstacles) do if intersects(envelope,other) then relevant[#relevant+1]=other end end
+	local relevant={} for _,other in ipairs(obstacleIndex and obstacleIndex:query(envelope) or obstacles) do if intersects(envelope,other) then relevant[#relevant+1]=other end end
 	obstacles=relevant
 	if not safeBox(recipe.initial,recipe.target,obstacles,exclude,false) then return nil end
 	if recipe.kind=="reuse" then
+		local r=table.clone(recipe) r.steps={} return r
+	end
+	if recipe.shapeSteps==0 then
+		if not geometry(recipe.initial,recipe.target) then return nil end
 		local r=table.clone(recipe) r.steps={} return r
 	end
 	for _,axisOrder in ipairs(permutations) do
@@ -1422,12 +1474,13 @@ local function nearestModels(target,models,maximum)
 	end
 	for _,m in ipairs(models) do
 		if m.id~=target.id then
-			local value={model=m,distance=distance(m)}
+			local d=distance(m)
 			if #heap<maximum then
+				local value={model=m,distance=d}
 				heap[#heap+1]=value local i=#heap
 				while i>1 do local parent=math.floor(i/2) if heap[parent].distance>=heap[i].distance then break end heap[parent],heap[i]=heap[i],heap[parent] i=parent end
-			elseif value.distance<heap[1].distance then
-				heap[1]=value local i=1
+			elseif d<heap[1].distance then
+				local value=heap[1] value.model=m value.distance=d local i=1
 				while i*2<=#heap do
 					local child=i*2 if child+1<=#heap and heap[child+1].distance>heap[child].distance then child=child+1 end
 					if heap[i].distance>=heap[child].distance then break end heap[i],heap[child]=heap[child],heap[i] i=child
@@ -1444,9 +1497,10 @@ function P.prepare(targets,world,options)
 		if options.cancelled and options.cancelled() then error("Подготовка остановлена",0) end
 		if options.progress then options.progress(text,fraction) end
 	end
-	local models={} local byId={}
-	for _,m in ipairs(world) do if m.eligible~=false then models[#models+1]=m end byId[m.id]=m end
-	for _,m in ipairs(targets) do models[#models+1]=m byId[m.id]=m end
+	local models={}
+	for _,m in ipairs(world) do if m.eligible~=false then models[#models+1]=m end end
+	for _,m in ipairs(targets) do models[#models+1]=m end
+	local targetIndex=Spatial.new(targets)
 	local recipes,lowerCosts={},{ }
 	for i,target in ipairs(targets) do
 		local usedFaces={} for _,sp in ipairs(target.sprays) do if usedFaces[sp.face] then error("Блок "..i..": несколько надписей на одной грани",0) end usedFaces[sp.face]=true end
@@ -1454,6 +1508,10 @@ function P.prepare(targets,world,options)
 		if #baseline==0 then error("Блок "..i..": границы не совместимы с целыми шагами граней",0) end
 		local list={} for _,r in ipairs(baseline) do list[#list+1]=r end
 		local bestCost=baseline[1].operations
+		local partial=options.partials and options.partials[i]
+		if partial then local edit=makeRecipe({pos=partial.pos,size=partial.size},target,partial,"edit") if edit then list[#list+1]=edit end end
+		local activeSource=options.activeSources and options.activeSources[i]
+		if activeSource then for _,r in ipairs(P.copies(activeSource,target,false)) do list[#list+1]=r end end
 		for _,source in ipairs(world) do
 			if source.id==target.id and source.eligible~=false and geometry(source,target) then
 				local r=makeRecipe({pos=source.pos,size=source.size},target,source,"reuse") if r then list[#list+1]=r end
@@ -1497,6 +1555,7 @@ function P.prepare(targets,world,options)
 	local function evaluate(name,spatial,lookahead,planNumber)
 		local available={} local obstacles={} local done={} local plan={name=name,items={},operations=0,shapeSteps=0,helpers=0,score=0}
 		for _,m in ipairs(world) do available[m.id]=true obstacles[#obstacles+1]=m end
+		local obstacleIndex=Spatial.new(world)
 		local ready={}
 		local function refresh(i)
 			ready[i]=nil
@@ -1521,8 +1580,7 @@ function P.prepare(targets,world,options)
 								if not done[saving.index] and saving.index~=i then score=score-.2*saving.saving counted=counted+1 if counted==3 then break end end
 							end
 						end
-						local reuseId=r.kind=="reuse" and r.source.id or nil
-						evaluations[#evaluations+1]={index=i,score=score,recipe=r,reuseId=reuseId}
+						evaluations[#evaluations+1]={index=i,score=score,recipe=r}
 					end
 				end
 			end
@@ -1531,7 +1589,7 @@ function P.prepare(targets,world,options)
 				if best and choice.score>bestScore then break end
 				for _,candidate in ipairs(recipes[choice.index]) do
 					if not candidate.source or available[candidate.source.id] then
-						local compiled=P.compile(candidate,obstacles,targets,candidate.kind=="reuse" and candidate.source.id or nil,function() checkpoint(name..": проверка промежуточных объёмов",.45+.55*(planNumber-1+step/#targets)/3) end)
+						local compiled=P.compile(candidate,obstacles,targets,(candidate.kind=="reuse" or candidate.kind=="edit") and candidate.source.id or nil,function() checkpoint(name..": проверка промежуточных объёмов",.45+.55*(planNumber-1+step/#targets)/3) end,obstacleIndex,targetIndex)
 						if compiled then
 							local score=choice.score+(spatial and 0 or compiled.operations-choice.recipe.operations)
 							if score<bestScore then best,bestIndex,bestScore=compiled,choice.index,score end
@@ -1555,6 +1613,7 @@ function P.prepare(targets,world,options)
 			end
 			if best.kind=="reuse" and best.source.id~=target.id then available[best.source.id]=false end
 			obstacles[#obstacles+1]=target position=target.pos
+			obstacleIndex:add(target)
 			if step%8==0 or step==#targets then
 				if options.visual then options.visual("candidate",plan,step) end
 				checkpoint(name..": "..step.."/"..#targets,.45+.55*(planNumber-1+step/#targets)/3) end
@@ -1614,7 +1673,9 @@ function P.prepareOrdered(targets,scene,options,order)
 		if options.cancelled and options.cancelled() then error("Подготовка остановлена",0) end
 		local target=targets[index]
 		if not target or seen[index] then error("Неверный порядок шаблона",0) end
-		local recipe=P.chooseLive(target,sources,obstacles,targets,options.bridges==true)
+		local currentSources=sources
+		if options.activeSources and options.activeSources[index] then currentSources=table.clone(sources) currentSources[#currentSources+1]=options.activeSources[index] end
+		local recipe=P.chooseLive(target,currentSources,obstacles,targets,options.bridges==true,options.partials and options.partials[index])
 		if not recipe then error("Порядок шаблона закрывает безопасный путь блока "..index,0) end
 		recipe.index=index seen[index]=true plan.items[#plan.items+1]=recipe
 		plan.operations+=recipe.operations plan.shapeSteps+=recipe.shapeSteps plan.helpers+=#recipe.helpers
@@ -1628,7 +1689,7 @@ end
 
 return P
 end)()
--- A build request is never retried automatically: the server has no request IDs.
+-- A build request is never retried blindly: reconcile the world, wait for late replies, then apply a bounded retry.
 local positionLock, positionPhysics, noclipConnection, toolEquipConnection
 local isBuilding = false
 local collisionState, toolState = {}, {}
@@ -1986,6 +2047,18 @@ local function snapshotWorld(session)
 			if model.eligible and not session.helpers[brick] then sources[#sources+1]=model end
 			session.instances[id]=brick
 		end
+	end
+	for i,data in ipairs(session.blocks) do
+		local function reserve(holder,suffix)
+			local function include(initial,tag)
+				if initial then result[#result+1]={id="reserved:"..i..suffix..tag,reservedTarget=session.models[i].id,reservedHolder=holder,pos=initial.pos,size=initial.size,color=data.color,material=data.material,collide=true,sprays={},eligible=false} end
+			end
+			local pending=holder.creation
+			if pending and (not pending.attempts or pending.attempts>0) then include(pending.initial or data.work and data.work.recipe.initial,"") end
+			for n,old in ipairs(holder.retired or {}) do include(old.initial,":retired:"..n) end
+		end
+		reserve(data,"")
+		for n,h in ipairs(data.work and data.work.helpers or {}) do reserve(h,":"..n) end
 	end
 	return result,sources
 end
@@ -2700,10 +2773,10 @@ trackConn(LocalPlayer.CharacterAdded:Connect(function(character)
 end))
 watchBuildCharacter(LocalPlayer.Character)
 
-local function ensureNear(position,sourcePosition)
+local function ensureNear(position,sourcePosition,force)
 	local hrp=getValidHRP()
 	if not hrp or cancelled() then return false end
-	if positionLock and (hrp.Position-position).Magnitude<=20 and (not sourcePosition or (hrp.Position-sourcePosition).Magnitude<=20) then return true end
+	if not force and positionLock and (hrp.Position-position).Magnitude<=20 and (not sourcePosition or (hrp.Position-sourcePosition).Magnitude<=20) then return true end
 	local anchor=position
 	local height=CONFIG.BUILD_HEIGHT_OFFSET
 	if sourcePosition then
@@ -2714,12 +2787,12 @@ local function ensureNear(position,sourcePosition)
 	end
 	local target=anchor+Vector3.new(0,height,0)
 	lockPosition(target)
-	local readyAt=os.clock()+math.clamp(roundTripPing(),.06,.3)
+	local readyAt=os.clock()+math.max(.08,roundTripPing()*2)
 	return waitUntil(function()
 		local c=LocalPlayer.Character
 		local r=c and c:FindFirstChild("HumanoidRootPart")
 		return os.clock()>=readyAt and r and (r.Position-target).Magnitude<.1
-	end,2)
+	end,math.max(2,roundTripPing()*4+.5))
 end
 local function facePoint(model,face)
 	for _,d in ipairs(Planner.directions) do
@@ -2727,69 +2800,273 @@ local function facePoint(model,face)
 	end
 	return model.pos
 end
-local function createOnce(holder,source,face,initial,mode,session,label)
-	if holder.brick and holder.brick.Parent then return holder.brick end
-	local folder=getPlayerBricksFolder()
-	local tool=not holder.creation and awaitTool("Build") or nil
-	if not folder or (not holder.creation and not tool) then return nil,"Нет Build или вашей папки блоков" end
-	if not holder.creation then
-		if source and (not source.Parent or not source.Anchored) then return nil,"Источник копии удалён или изменён" end
-		if source then
-			local prediction
-			for _,d in ipairs(Planner.directions) do if d.face==face then prediction=source.Position+d.unit*source.Size[d.axis] break end end
-			if not prediction or (prediction-initial.pos).Magnitude>.03 or (source.Size-initial.size).Magnitude>.03 then return nil,"Источник копии изменил положение или размер" end
+local createOnce=(function()
+	local C={}
+	local observerToken={}
+	local active={}
+	local manifestFile="AutobuildRecovery.json"
+	local stateFile="AutobuildPending.json"
+	local lastManifest
+	local function descendants(folder) return folder.GetDescendants and folder:GetDescendants() or folder:GetChildren() end
+	local function ownPart(part,folder)
+		return part and part.Parent and part:IsA("BasePart") and part.Name=="Brick" and part.Anchored and part:IsDescendantOf(folder)
+	end
+	local function same(part,model) return (part.Position-model.pos).Magnitude<.03 and (part.Size-model.size).Magnitude<.03 end
+	local function packedBox(m) return m and {pos=planVector(m.pos),size=planVector(m.size)} end
+	local function box(m)
+		if type(m)~="table" then return nil end
+		local p,s=readPlanVector(m.pos),readPlanVector(m.size)
+		if not p or not s or s.X<1 or s.Y<1 or s.Z<1 then return nil end
+		return {pos=p,size=s}
+	end
+	local function packedSource(m)
+		if not m then return nil end
+		return serializeBlock({centerPos=m.pos,size=m.size,color=m.color,material=m.material,canCollide=m.collide,sprays=m.sprays or {}})
+	end
+	local function unique(model)
+		local folder=getPlayerBricksFolder() if not folder or not model then return nil end
+		local found
+		for _,part in ipairs(descendants(folder)) do if ownPart(part,folder) and same(part,model) then if found then return nil end found=part end end
+		return found
+	end
+	local function packedHolder(holder)
+		local value={temporary=holder.temporary==true,deleteRequested=holder.deleteRequested==true,brick=holder.brick and holder.brick.Parent and packedBox(instanceModel(holder.brick,"checkpoint")) or nil,retired={}}
+		for _,old in ipairs(holder.retired or {}) do value.retired[#value.retired+1]={initial=packedBox(old.initial),beforeCount=old.beforeCount or 0} end
+		local c=holder.creation
+		if c then value.creation={initial=packedBox(c.initial),mode=c.mode,face=FaceSymbols[c.face],clone=c.expectedClone==true,beforeCount=c.beforeCount or 0,attempts=c.attempts or 1,sentUnix=c.sentUnix,source= c.source and c.source.Parent and packedSource(instanceModel(c.source,"checkpoint")) or nil} end
+		return value
+	end
+	function C.capture(session)
+		_G.AUTOBUILD_RESUME={version=2,job=game.JobId,session=session}
+		if not writefile then return end
+		local records={}
+		for index,data in ipairs(session.blocks) do
+			if data.work and not session.done[index] then
+				local recipe=data.work.recipe
+				local record={index=index,holder=packedHolder(data),recipe={kind=recipe.kind,initial=packedBox(recipe.initial),face=FaceSymbols[recipe.face],source=packedSource(recipe.source),helpers={}},helpers={}}
+				for _,h in ipairs(recipe.helpers or {}) do record.recipe.helpers[#record.recipe.helpers+1]=packedBox(h) end
+				for _,h in ipairs(data.work.helpers or {}) do record.helpers[#record.helpers+1]=packedHolder(h) end
+				if data.pendingResize then record.resize={before=packedBox(data.pendingResize.step.before),after=packedBox(data.pendingResize.step.after),mode=data.pendingResize.step.mode} end
+				record.collision=data.pendingCollision==true records[#records+1]=record
+			end
 		end
-		local input=source and facePoint(instanceModel(source,"input"),face) or initial.pos
-		if not source and mode=="detailed" then input=input+CONFIG.DETAILED_INPUT_OFFSET end
-		if not ensureNear(input,source and source.Position or nil) then return nil,"Не удалось подойти к точке создания и источнику" end
-		local obstacles=snapshotWorld(session)
-		if not Planner.safeBox(initial,holder.finalModel or initial,obstacles,nil,holder.temporary==true) then return nil,"Промежуточный объём занят; создание остановлено" end
-		holder.creation={candidates={},before={},folder=folder}
-		for _,existing in ipairs(folder:GetChildren()) do holder.creation.before[existing]=true end
-		local creation=holder.creation
-		creation.connection=trackConn(folder.ChildAdded:Connect(function(child)
-			if child:IsA("BasePart") and child.Name=="Brick" then creation.candidates[#creation.candidates+1]=child end
-		end))
-		if cancelled() then creation.connection:Disconnect() holder.creation=nil return nil,"Пауза" end
-		session.actual.creates=session.actual.creates+1
-		local ok,err=pcall(function() tool.event:FireServer(source or workspace.Terrain,face or Enum.NormalId.Top,input,mode) end)
-		if not ok then creation.connection:Disconnect() holder.creation=nil return nil,tostring(err) end
+		local ok,err=pcall(function()
+			if not lastManifest or lastManifest.id~=session.buildId or lastManifest.text~=session.text or lastManifest.offset~=session.offset then
+				writefile(manifestFile,HttpService:JSONEncode({version=1,job=game.JobId,buildId=session.buildId,text=session.text,offset=planVector(session.offset)})) lastManifest={id=session.buildId,text=session.text,offset=session.offset}
+			end
+			writefile(stateFile,HttpService:JSONEncode({version=1,job=game.JobId,buildId=session.buildId,records=records}))
+		end)
+		if not ok then setStatus("Состояние в памяти; контрольная запись не удалась: "..tostring(err),true) end
 	end
-	local creation=holder.creation
-	if creation.folder~=folder then
-		creation.connection:Disconnect() creation.folder=folder
-		creation.connection=trackConn(folder.ChildAdded:Connect(function(child)
-			if child:IsA("BasePart") and child.Name=="Brick" then creation.candidates[#creation.candidates+1]=child end
-		end))
+	function C.restore(session)
+		if not readfile or not isfile then return end
+		pcall(function()
+			if not isfile(manifestFile) or not isfile(stateFile) then return end
+			local manifest=HttpService:JSONDecode(readfile(manifestFile)) local stored=HttpService:JSONDecode(readfile(stateFile))
+			if type(manifest)~="table" or type(stored)~="table" or manifest.version~=1 or stored.version~=1 or manifest.job~=game.JobId or stored.job~=game.JobId or manifest.buildId~=session.buildId or stored.buildId~=session.buildId or manifest.text~=session.text or readPlanVector(manifest.offset)~=session.offset or type(stored.records)~="table" then return end
+			local folder=getPlayerBricksFolder() if not folder then return end
+			local function holder(saved,final)
+				if type(saved)~="table" then return nil end
+				local result={temporary=saved.temporary==true,deleteRequested=saved.deleteRequested==true,finalModel=final}
+				result.brick=unique(box(saved.brick))
+				result.retired={}
+				for _,old in ipairs(type(saved.retired)=="table" and saved.retired or {}) do
+					local initial=type(old)=="table" and box(old.initial)
+					if initial then
+						local retired={initial=initial,candidates={},seen={},before={}}
+						if type(old.beforeCount)=="number" and old.beforeCount>0 then for _,p in ipairs(descendants(folder)) do if ownPart(p,folder) and same(p,initial) then retired.before[p]=true end end end
+						result.retired[#result.retired+1]=retired
+					end
+				end
+				if type(saved.creation)=="table" then
+					local c=saved.creation local initial=box(c.initial) local source
+					if type(c.source)=="string" then local parsed,bad=parseBlocks(c.source,Vector3.zero) if bad==0 and #parsed==1 then source=unique({pos=parsed[1].centerPos,size=parsed[1].size}) end end
+					if initial and (c.mode=="normal" or c.mode=="detailed") then
+						local age=type(c.sentUnix)=="number" and math.clamp(os.time()-c.sentUnix-1,0,600) or 0
+						result.creation={initial=initial,mode=c.mode,face=FaceSymbolsReverse[c.face] or Enum.NormalId.Top,expectedClone=c.clone==true,source=source,candidates={},seen={},before={},beforeCount=type(c.beforeCount)=="number" and math.max(0,c.beforeCount) or 0,attempts=type(c.attempts)=="number" and math.clamp(c.attempts,1,10000) or 1,sentAt=os.clock()-age,sentUnix=os.time()-age}
+						if result.creation.beforeCount>0 then for _,p in ipairs(descendants(folder)) do if ownPart(p,folder) and same(p,initial) then result.creation.before[p]=true end end end
+					end
+				end
+				return result
+			end
+			for _,record in ipairs(stored.records) do
+				local index=type(record)=="table" and record.index
+				local data=index and session.blocks[index] local target=index and session.models[index]
+				if not data or type(record.recipe)~="table" then continue end
+				local initial=box(record.recipe.initial) if not initial then continue end
+				if not ({normal=true,detailed=true,clone=true,reuse=true,bridge=true,edit=true})[record.recipe.kind] then continue end
+				local source
+				if type(record.recipe.source)=="string" then
+					local parsed,bad=parseBlocks(record.recipe.source,Vector3.zero)
+					if bad==0 and #parsed==1 then source=targetModel(parsed[1],"recovered-source") source.instance=unique(source) end
+				end
+				local recipe={kind=record.recipe.kind,initial=initial,target=target,source=source,face=FaceSymbolsReverse[record.recipe.face],helpers={},shapeSteps=0}
+				for _,packed in ipairs(record.recipe.helpers or {}) do local h=box(packed) if not h then return end recipe.helpers[#recipe.helpers+1]=h end
+				if #recipe.helpers>2 then continue end
+				local restored=holder(record.holder,target) if not restored then continue end
+				if not restored.brick and type(record.resize)=="table" then restored.brick=unique(box(record.resize.after)) or unique(box(record.resize.before)) end
+				data.brick=restored.brick data.placedBrick=restored.brick data.creation=restored.creation data.finalModel=target
+				data.retired=restored.retired
+				if data.placedBrick then session.ids[data.placedBrick]=target.id session.instances[target.id]=data.placedBrick end
+				data.work={recipe=recipe,helpers={}}
+				for n,h in ipairs(record.helpers or {}) do
+					local helper=holder(h,recipe.helpers[n]) if not helper then break end
+					data.work.helpers[n]=helper if helper.brick then session.helpers[helper.brick]=true end
+				end
+				if data.placedBrick and type(record.resize)=="table" and box(record.resize.after) and box(record.resize.before) then data.pendingResize={brick=data.placedBrick,step={before=box(record.resize.before),after=box(record.resize.after),mode=record.resize.mode}} end
+				data.pendingCollision=record.collision==true and true or nil
+			end
+			setStatus("Восстановлена незавершённая работа; сверяю реальные блоки")
+		end)
 	end
-	-- A reset can replace the owner folder between the request and its response.
-	-- Reconcile late candidates by identity, without ever repeating the request.
-	local seen={}
-	for _,candidate in ipairs(creation.candidates) do seen[candidate]=true end
-	for _,candidate in ipairs(folder:GetChildren()) do
-		if not creation.before[candidate] and not seen[candidate] and candidate:IsA("BasePart") and candidate.Name=="Brick" then
-			creation.candidates[#creation.candidates+1]=candidate seen[candidate]=true
+	function C.preparation(session)
+		local partials,sources={},{}
+		for index,data in ipairs(session.blocks) do
+			if data.placedBrick and data.placedBrick.Parent and not session.done[index] then partials[index]=instanceModel(data.placedBrick,session.ids[data.placedBrick] or session.models[index].id) end
+			local helpers=data.work and data.work.helpers or {}
+			for n=#helpers,1,-1 do
+				local part=helpers[n].brick
+				if part and part.Parent then local m=instanceModel(part,session.ids[part] or "resume:"..index..":"..n) m.external=true sources[index]=m break end
+			end
 		end
+		return partials,sources
 	end
-	local selected,ambiguous
-	local ok=waitUntil(function()
-		local candidates={}
-		for _,brick in ipairs(holder.creation.candidates) do
-			if brick.Parent and (brick.Position-initial.pos).Magnitude<.03 and (brick.Size-initial.size).Magnitude<.03 then candidates[#candidates+1]=brick end
+	local function watch(c,folder)
+		if c.observerToken==observerToken and c.folder==folder then return end
+		if c.connection then c.connection:Disconnect() end
+		c.folder=folder c.observerToken=observerToken c.seen=c.seen or {}
+		c.connection=(folder.DescendantAdded or folder.ChildAdded):Connect(function(part)
+			if part:IsA("BasePart") and not c.before[part] and not c.seen[part] then c.candidates[#c.candidates+1]=part c.seen[part]=true end
+		end)
+		active[c]=true c.nextScan=0
+	end
+	local function resolve(c,folder,holder,session)
+		watch(c,folder)
+		-- Poll as well as listen: streaming and delayed Name/Size replication can
+		-- occur after the original hierarchy event, including under child Models.
+		if os.clock()>=(c.nextScan or 0) then
+			c.nextScan=os.clock()+.1
+			for _,part in ipairs(descendants(folder)) do
+				if part:IsA("BasePart") and not c.before[part] and not c.seen[part] and same(part,c.initial) then c.candidates[#c.candidates+1]=part c.seen[part]=true end
+			end
 		end
-		if #candidates>1 then ambiguous=true return true end
-		if #candidates==1 then selected=candidates[1] return true end
-		return false
-	end,responseTimeout(5))
-	if ambiguous then return nil,"Получены несколько подходящих новых блоков; автоматический выбор остановлен" end
-	if not ok or not selected then
-		local detail="Создание не подтверждено; новых блоков: "..#holder.creation.candidates
-		for _,b in ipairs(holder.creation.candidates) do if b.Parent then detail=detail.."; факт "..tostring(b.Position).." / "..tostring(b.Size) break end end
-		return nil,detail.."; ожидалось "..tostring(initial.pos).." / "..tostring(initial.size)..". Запрос не повторён."
+		local found
+		for _,part in ipairs(c.candidates) do
+			if ownPart(part,folder) and same(part,c.initial) then
+				if found and part~=found then return nil,"ambiguous" end
+				local claimed=session.ids[part]
+				if not claimed or claimed:sub(1,2)=="w:" or holder.brick==part then found=part end
+			end
+		end
+		return found
 	end
-	holder.creation.connection:Disconnect() holder.creation=nil holder.brick=selected
-	return selected
-end
+	local function accept(holder,part,session)
+		local c=holder.creation c.connection:Disconnect() active[c]=nil holder.creation=nil holder.brick=part holder.createBlocked=nil
+		C.capture(session) return part
+	end
+	function C.create(holder,source,face,initial,mode,session,label)
+		if holder.brick and holder.brick.Parent then return holder.brick end
+		local folder=getPlayerBricksFolder() if not folder then return nil,"Нет вашей папки блоков" end
+		local c=holder.creation
+		for _,retired in ipairs(holder.retired or {}) do
+			if retired.initial and (retired.initial.pos-initial.pos).Magnitude<.03 and (retired.initial.size-initial.size).Magnitude<.03 then
+				local part=resolve(retired,folder,holder,session)
+				if part then holder.creation=retired return accept(holder,part,session) end
+			end
+		end
+		if not c then
+			c={candidates={},seen={},before={},initial=initial,mode=mode,face=face or Enum.NormalId.Top,source=source,expectedClone=source~=nil,attempts=0,beforeCount=0,sentAt=-math.huge,roundAttempts=0}
+			for _,part in ipairs(descendants(folder)) do if ownPart(part,folder) and same(part,initial) then c.before[part]=true c.beforeCount+=1 end end
+			holder.creation=c
+		elseif not c.initial then
+			-- Migrate an in-memory pending request from the previous implementation.
+			local recipe=holder.work and holder.work.recipe
+			c.initial=initial c.mode=mode c.face=face or Enum.NormalId.Top c.source=source or recipe and recipe.source and (recipe.source.instance or session.instances[recipe.source.id]) c.expectedClone=recipe and (recipe.kind=="clone" or recipe.kind=="bridge") or source~=nil c.attempts=1 c.sentAt=os.clock()-10 c.sentUnix=os.time() c.seen={}
+			for _,part in ipairs(c.candidates) do c.seen[part]=true end
+		end
+		if c.roundAttempts==nil or c.action~=session.actionRevision then c.action=session.actionRevision c.roundAttempts=0 end
+		local found,reason=resolve(c,folder,holder,session)
+		if found then return accept(holder,found,session) end
+		if reason then holder.createBlocked=true return nil,"Несколько новых блоков совпадают; требуется сверка, чужие детали не удаляются" end
+		while c.roundAttempts<3 and not cancelled() do
+			if c.attempts>0 then
+				local deadline=c.sentAt+math.max(10,roundTripPing()*8+1)
+				if os.clock()<deadline then
+					local ready=waitUntil(function()
+						folder=getPlayerBricksFolder() or folder found,reason=resolve(c,folder,holder,session)
+						return found~=nil or reason~=nil
+					end,deadline-os.clock())
+					if ready and found then return accept(holder,found,session) end
+					if cancelled() then return nil,"Пауза; ожидание сохранено" end
+					if reason then break end
+				end
+				-- A retry follows an extra quiet interval and a fresh world read.
+				if not waitUntil(function() return os.clock()>=c.sentAt+math.max(10,roundTripPing()*8+1)+math.max(.2,roundTripPing()*2) end,math.max(.5,roundTripPing()*2+.1)) then return nil,"Пауза; ожидание сохранено" end
+			end
+			found,reason=resolve(c,folder,holder,session) if found then return accept(holder,found,session) end
+			if reason then break end
+			local tool=awaitTool("Build") if not tool then break end
+			local currentSource=c.source
+			if c.expectedClone and (not currentSource or not currentSource.Parent) then
+				-- The source has been removed, so this recipe cannot be sent again.
+				-- Keep its listener alive while the executor replans the missing stage.
+				holder.retired=holder.retired or {} holder.retired[#holder.retired+1]=c
+				holder.creation=nil holder.createBlocked=true C.capture(session)
+				return nil,"Источник прежнего создания исчез; пересчитаю этот этап после сверки мира"
+			end
+			if currentSource then
+				if not currentSource.Parent or not currentSource.Anchored then break end
+				local prediction
+				for _,d in ipairs(Planner.directions) do if d.face==c.face then prediction=currentSource.Position+d.unit*currentSource.Size[d.axis] break end end
+				if not prediction or (prediction-c.initial.pos).Magnitude>.03 or (currentSource.Size-c.initial.size).Magnitude>.03 then
+					holder.retired=holder.retired or {} holder.retired[#holder.retired+1]=c holder.creation=nil holder.createBlocked=true C.capture(session)
+					return nil,"Источник изменился; пересчитаю этап, старый ответ остаётся под наблюдением"
+				end
+			end
+			local input=currentSource and facePoint(instanceModel(currentSource,"input"),c.face) or c.initial.pos
+			if not currentSource and c.mode=="detailed" then input+=CONFIG.DETAILED_INPUT_OFFSET end
+			if not ensureNear(input,currentSource and currentSource.Position or nil,c.attempts>0) then break end
+			found,reason=resolve(c,folder,holder,session) if found then return accept(holder,found,session) end
+			local obstacles=snapshotWorld(session)
+			for n=#obstacles,1,-1 do if obstacles[n].reservedHolder==holder then table.remove(obstacles,n) end end
+			if not Planner.safeBox(c.initial,holder.finalModel or c.initial,obstacles,nil,holder.temporary==true) then break end
+			if cancelled() then return nil,"Пауза; ожидание сохранено" end
+			if session.lastCreateSent then
+				if not waitUntil(function() return os.clock()-session.lastCreateSent>=math.max(.12,roundTripPing()) end,math.max(.5,roundTripPing()+.1)) then return nil,"Пауза; ожидание сохранено" end
+			end
+			found,reason=resolve(c,folder,holder,session) if found then return accept(holder,found,session) end
+			if reason then break end
+			c.roundAttempts+=1 c.attempts+=1 c.sentAt=os.clock() c.sentUnix=os.time()
+			session.lastCreateSent=c.sentAt
+			C.capture(session)
+			if c.attempts>1 then setStatus(label..": восстанавливаю создание, попытка "..c.roundAttempts.."/3") end
+			session.actual.creates+=1
+			local sent,err=pcall(function() tool.event:FireServer(currentSource or workspace.Terrain,c.face,input,c.mode) end)
+			if not sent then c.sentAt=os.clock()-10 setStatus("Команда Build не отправлена: "..tostring(err),true) end
+			local ready=waitUntil(function()
+				folder=getPlayerBricksFolder() or folder found,reason=resolve(c,folder,holder,session)
+				return found~=nil or reason~=nil
+			end,responseTimeout(5))
+			if ready and found then return accept(holder,found,session) end
+			if reason then break end
+		end
+		holder.createBlocked=true C.capture(session)
+		return nil,string.format("Блок пока не появился: %s @ %s; попыток %d; RTT×2 %.3fс. Состояние сохранено; продолжение проверит мир и сможет повторить создание.",tostring(c.initial.size),tostring(c.initial.pos),c.attempts,roundTripPing())
+	end
+	function C.close()
+		for c in pairs(active) do if c.connection then c.connection:Disconnect() end end table.clear(active)
+	end
+	function C.completed(data)
+		local function clear(holder)
+			for _,c in ipairs(holder.retired or {}) do if c.connection then c.connection:Disconnect() end active[c]=nil end
+			holder.retired=nil holder.createBlocked=nil
+		end
+		clear(data) for _,h in ipairs(data.work and data.work.helpers or {}) do clear(h) end
+	end
+	StudioHooks.recovery=C
+	return C.create
+end)()
+
 local function boundaryEdit(brick,target,session,data)
 	if data.pendingResize then
 		local pending=data.pendingResize
@@ -2812,6 +3089,7 @@ local function boundaryEdit(brick,target,session,data)
 		if not tool or not hrp or cancelled() then return false,"Нет Shape или персонажа" end
 		session.actual.shapes=session.actual.shapes+1
 		data.pendingResize={brick=brick,step=step}
+		StudioHooks.recovery.capture(session)
 		local sent,sendError=pcall(function() tool.event:FireServer(brick,step.face,hrp.Position,step.mode) end)
 		if not sent then data.pendingResize=nil return false,tostring(sendError) end
 		if not waitUntil(function() return brick.Parent and (brick.Size-step.after.size).Magnitude<.03 and (brick.Position-step.after.pos).Magnitude<.03 end,responseTimeout(2)) then
@@ -2834,6 +3112,7 @@ local function deleteHelper(holder,session)
 		local hrp=LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
 		if not tool or not hrp then return false,"Нужен Delete для удаления временных блоков" end
 		holder.deleteRequested=true session.actual.deletes=session.actual.deletes+1
+		StudioHooks.recovery.capture(session)
 		tool.event:FireServer(brick,hrp.Position)
 	end
 	if not waitUntil(function() return brick.Parent==nil end,responseTimeout(5)) then return false,"Удаление временного блока не подтверждено; повтор не отправлен" end
@@ -2849,6 +3128,7 @@ local function collisionConfirmed(brick,data)
 	local hrp=getValidHRP() local tool=awaitTool("Paint")
 	if not tool or not hrp or cancelled() then return false end
 	data.pendingCollision=true
+	if resumeSession then StudioHooks.recovery.capture(resumeSession) end
 	local sent=pcall(function() tool.event:FireServer(brick,Enum.NormalId.Back,hrp.Position,"material",data.color,"collide","") end)
 	if not sent then data.pendingCollision=nil return false end
 	if not waitUntil(function() return brick.Parent and brick.CanCollide==data.canCollide end,responseTimeout(2)) then return false end
@@ -2969,8 +3249,10 @@ local function runBuilderEngine(buildString,offset,prepareOnly)
 		if invalid>0 or #blocks==0 then return false,"Некорректные данные постройки" end
 		resumeSession={buildId=PlanLibrary.id(),text=buildString,offset=offset,blocks=blocks,done={},models={},ids={},instances={},nextWorld=0,helpers={},actual={creates=0,shapes=0,deletes=0}}
 		for i,data in ipairs(blocks) do resumeSession.models[i]=targetModel(data,i) end
+		StudioHooks.recovery.restore(resumeSession)
 	end
 	local session=resumeSession
+	session.actionRevision=(session.actionRevision or 0)+1
 	reconcileBuild(session)
 	_G.autobuildTotal=#session.blocks _G.autobuildPlaced=0
 	for i,data in ipairs(session.blocks) do
@@ -2982,8 +3264,9 @@ local function runBuilderEngine(buildString,offset,prepareOnly)
 		local char=LocalPlayer.Character local root=char and char:FindFirstChild("HumanoidRootPart")
 		local started=os.clock()
 		btnStart.Text="ГОТОВЛЮ ПЛАН"
+		local partials,activeSources=StudioHooks.recovery.preparation(session)
 		local cached=loadPreparedPlan(session,scene,findTool("Delete")~=nil)
-		session.plan=cached or PlanLibrary.prepare(session.models,scene,{bridges=findTool("Delete")~=nil,position=root and root.Position or session.models[1].pos,cancelled=cancelled,visual=function(phase,payload,count) PlanDrawing.progress(session,phase,payload,count) end,progress=function(text,fraction)
+		session.plan=cached or PlanLibrary.prepare(session.models,scene,{partials=partials,activeSources=activeSources,bridges=findTool("Delete")~=nil,position=root and root.Position or session.models[1].pos,cancelled=cancelled,visual=function(phase,payload,count) PlanDrawing.progress(session,phase,payload,count) end,progress=function(text,fraction)
 			setStatus(string.format("Подготовка %d%% · %s",math.round(fraction*100),text))
 			statDisplay.Text="Подготовка · "..#session.blocks.." блоков"
 			task.wait()
@@ -3008,17 +3291,36 @@ local function runBuilderEngine(buildString,offset,prepareOnly)
 	if handles then handles:Destroy() handles=nil end
 	task.wait()
 	enableNoclip() startToolForcing()
+	local deferred={}
 	for rank,item in ipairs(session.plan.items) do
 		advancePlanPreview(session,rank)
 		local i=item.index local data=session.blocks[i]
 		if cancelled() then return false,"Пауза. План и временные детали сохранены для продолжения." end
 		if not session.done[i] then
 			local ok,err=executeBlock(data,i,session)
-			if not ok then return false,err end
+			if not ok then
+				local recoverable=data.creation~=nil or data.createBlocked==true
+				for _,h in ipairs(data.work and data.work.helpers or {}) do if h.creation or h.createBlocked then recoverable=true end end
+				if not recoverable or cancelled() then return false,err end
+				deferred[#deferred+1]=i setStatus("Откладываю блок "..i..": "..err,true)
+				continue
+			end
 			session.done[i]=true _G.autobuildPlaced=_G.autobuildPlaced+1
+			StudioHooks.recovery.completed(data)
+			StudioHooks.recovery.capture(session)
 			markPlanProgress(session,i)
 			if visualFolder then local visual=visualFolder:FindFirstChild("Visual_"..i) if visual then visual:Destroy() end end
 		end
+	end
+	for _,i in ipairs(deferred) do
+		if cancelled() then return false,"Пауза; незавершённые блоки сохранены" end
+		local data=session.blocks[i]
+		local ok,err=executeBlock(data,i,session)
+		if ok then session.done[i]=true _G.autobuildPlaced+=1 StudioHooks.recovery.completed(data) StudioHooks.recovery.capture(session) markPlanProgress(session,i)
+		else setStatus("Блок "..i.." остаётся в восстановлении: "..err,true) end
+	end
+	if #deferred>0 and _G.autobuildPlaced<#session.blocks then
+		return false,string.format("Готово %d/%d. Остальные блоки сохранены для восстановления; «Продолжить» сверит мир и повторит только отсутствующие этапы.",_G.autobuildPlaced,#session.blocks)
 	end
 	return true,string.format("Готово: %d блоков · созданий %d · изменений граней %d · удалений временных %d",#session.blocks,session.actual.creates,session.actual.shapes,session.actual.deletes)
 end
@@ -4479,6 +4781,7 @@ end))
 -- FULL UNLOAD LOGIC
 -- ============================================================================
 unloadScript = function()
+	if resumeSession and StudioHooks.recovery then StudioHooks.recovery.capture(resumeSession) StudioHooks.recovery.close() end
 	saveData()
 	if StudioHooks.close then StudioHooks.close() end
 	unloaded = true
@@ -4503,3 +4806,4 @@ unloadScript = function()
 end
 
 _G.AUTOBUILD_UNLOAD = unloadScript
+setStatus("ORBIT recovery-6: восстановление создания и ускоренный расчёт готовы")
