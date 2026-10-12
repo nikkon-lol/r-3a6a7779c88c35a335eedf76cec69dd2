@@ -3719,7 +3719,7 @@ function V.decorate(tool,name)
 	if not h then h=fallback(tool,name) end
 	tool.RequiresHandle=true
 	tool:SetAttribute("ImaginaryTool",true)
-	data[tool]={source=source,lastAction=-math.huge}
+	data[tool]={source=source,lastAction=-math.huge,serial=0}
 end
 function V.refresh()
 	for name,tool in pairs(tools) do if tool.Parent and tool.Parent~=LocalPlayer.Character then V.decorate(tool,name) end end
@@ -3738,35 +3738,86 @@ local function findAnimation(tool,kind)
 			end
 		end
 	end
-	if kind=="equip" then return nil end
+	if kind~="idle" then return nil end
 	local character=LocalPlayer.Character
 	local animate=character and character:FindFirstChild("Animate")
-	local folder=animate and animate:FindFirstChild(kind=="idle" and "toolnone" or "toolslash")
+	local folder=animate and animate:FindFirstChild("toolnone")
 	if folder then for _,a in ipairs(folder:GetDescendants()) do if a:IsA("Animation") and a.AnimationId~="" then return a end end end
 end
-local function play(tool,kind)
+local function loadTrack(tool,kind,animation)
 	local character=LocalPlayer.Character
 	local hum=character and character:FindFirstChildOfClass("Humanoid")
 	local animator=hum and hum:FindFirstChildOfClass("Animator")
-	local animation=findAnimation(tool,kind)
 	if not animator or not animation then return end
 	local key=animation.AnimationId
 	local owned=tracks[tool] or {} tracks[tool]=owned
 	local entry=owned[kind]
 	if entry and (entry.animator~=animator or entry.id~=key) then pcall(function() entry.track:Stop(.1) entry.track:Destroy() end) owned[kind]=nil entry=nil end
-	-- Standard Animate may already be playing the same pose; leave it alone.
-	local ok,playing=pcall(function() return animator:GetPlayingAnimationTracks() end)
-	if kind=="idle" and ok then for _,t in ipairs(playing) do if t.Animation and t.Animation.AnimationId==key and t.IsPlaying then return end end end
 	if not entry then
 		local loaded,track=pcall(function() return animator:LoadAnimation(animation) end)
 		if not loaded then if not reported[key] then reported[key]=true setStatus("Анимация предмета недоступна: "..key,true) end return end
 		entry={id=key,animator=animator,track=track} owned[kind]=entry
 	end
+	return entry.track
+end
+local function play(tool,kind)
+	local animation=findAnimation(tool,kind)
+	if not animation then return end
+	-- Standard Animate may already be playing the same pose; leave it alone.
+	local character=LocalPlayer.Character
+	local hum=character and character:FindFirstChildOfClass("Humanoid")
+	local animator=hum and hum:FindFirstChildOfClass("Animator")
+	if kind=="idle" and animator then
+		local ok,playing=pcall(function() return animator:GetPlayingAnimationTracks() end)
+		if ok then for _,t in ipairs(playing) do if t.Animation and t.Animation.AnimationId==animation.AnimationId and t.IsPlaying then return end end end
+	end
+	local track=loadTrack(tool,kind,animation) if not track then return end
 	pcall(function()
-		entry.track.Priority=kind=="idle" and Enum.AnimationPriority.Idle or Enum.AnimationPriority.Action
-		entry.track.Looped=kind=="idle"
-		if not entry.track.IsPlaying then entry.track:Play(.1) end
+		track.Priority=kind=="idle" and Enum.AnimationPriority.Idle or Enum.AnimationPriority.Action
+		track.Looped=kind=="idle"
+		if kind~="idle" or not track.IsPlaying then track:Play(.1,1,1) end
 	end)
+end
+-- R15 sequence observed with Build/Delete; the user confirmed all bkit tools share it.
+-- These Animation instances are made dynamically by the game, outside Tools.
+local verifiedSequence={"rbxassetid://17755758967","rbxassetid://17755760862"}
+local function playVerified(tool)
+	local character=LocalPlayer.Character
+	local hum=character and character:FindFirstChildOfClass("Humanoid")
+	if not hum or hum.RigType~=Enum.HumanoidRigType.R15 or not sourceNames[tool.Name] then return false end
+	local info=data[tool]
+	info.serial+=1 local serial=info.serial
+	local loaded={}
+	for i,id in ipairs(verifiedSequence) do
+		local name="ImaginaryAction"..i
+		local animation=tool:FindFirstChild(name)
+		if not animation then animation=create("Animation",{Name=name,AnimationId=id,Parent=tool}) end
+		local track=loadTrack(tool,"phase"..i,animation)
+		if not track then V.clear(tool) return true end -- Missing asset must not leave half a sequence playing.
+		loaded[i]=track
+	end
+	local first,second=loaded[1],loaded[2]
+	local function current()
+		return not unloaded and info.serial==serial and mode=="create" and tool.Parent==character and LocalPlayer.Character==character and activeTool==tool.Name
+	end
+	local ok=pcall(function()
+		first:Stop(.1) second:Stop(.1)
+		first.Priority=Enum.AnimationPriority.Action second.Priority=Enum.AnimationPriority.Action
+		first.Looped=false second.Looped=false
+		first:Play(.1,1,1) first.TimePosition=0
+	end)
+	if not ok then V.clear(tool) return true end
+	-- Use the measured phase timing; Length=0 is not a reliable end signal.
+	task.delay(.1,function()
+		if info.serial~=serial then return end
+		if not current() then V.clear(tool) return end
+		local played=pcall(function() first:Stop(.1) second:Play(.1,1,1) second.TimePosition=0 end)
+		if not played then V.clear(tool) return end
+		task.delay(.1,function()
+			if info.serial==serial then pcall(function() second:Stop(.1) end) end
+		end)
+	end)
+	return true
 end
 function V.equipped(tool,name)
 	V.clear(tool)
@@ -3775,10 +3826,11 @@ function V.equipped(tool,name)
 end
 function V.activated(tool)
 	if mode~="create" or blocked() or not tool.Parent or tool.Parent~=LocalPlayer.Character then return end
-	local info=data[tool] if not info or os.clock()-info.lastAction<.35 then return end info.lastAction=os.clock()
-	play(tool,"action")
+	local info=data[tool] if not info or os.clock()-info.lastAction<.04 then return end info.lastAction=os.clock()
+	if not playVerified(tool) then play(tool,"action") end
 end
 function V.clear(only)
+	for tool,info in pairs(data) do if not only or only==tool then info.serial+=1 end end
 	for tool,owned in pairs(tracks) do
 		if not only or only==tool then
 			for _,entry in pairs(owned) do pcall(function() entry.track:Stop(.1) entry.track:Destroy() end) end

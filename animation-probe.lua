@@ -7,11 +7,13 @@ local player=Players.LocalPlayer
 local started=os.clock()
 local stopped=false
 local connections={}
-local lines={"AUTOBUILD ANIMATION PROBE 1","Read-only observer; use normal Build manually. Times are seconds since start."}
+local lines={"AUTOBUILD ANIMATION PROBE 2","Read-only observer; use normal tools manually. Summary continues after detailed output limit."}
 local seenTools=setmetatable({},{__mode="k"})
 local seenAnimators=setmetatable({},{__mode="k"})
 local seenTracks=setmetatable({},{__mode="k"})
 local clicks=0
+local capped=false
+local summaries={}
 local lastClickAt,lastClickTool=-math.huge,nil
 local status
 local function connect(signal,fn)
@@ -22,7 +24,11 @@ local function path(instance)
 	return ok and value or "?"
 end
 local function log(text)
-	if stopped or #lines>=900 then return end
+	if stopped then return end
+	if #lines>=900 then
+		if not capped then capped=true print("ANIM PROBE: detailed log limit reached; summary continues") if status then status.Text="Лимит подробностей; сводка продолжает собираться" end end
+		return
+	end
 	local line=string.format("+%.3fs %s",os.clock()-started,tostring(text))
 	lines[#lines+1]=line print("ANIM PROBE "..line)
 	if status then status.Text=string.format("Активаций: %d · записей: %d",clicks,#lines) end
@@ -40,6 +46,17 @@ local function describe(track)
 	return string.format("name=%s id=%s priority=%s loop=%s playing=%s time=%.3f length=%.3f speed=%.3f weight=%.3f target=%.3f origin=%s",
 		tostring(property(track,"Name","?")),tostring(animation and property(animation,"AnimationId","?") or "?"),tostring(property(track,"Priority","?")),tostring(property(track,"Looped",false)),tostring(property(track,"IsPlaying",false)),property(track,"TimePosition",0),property(track,"Length",0),property(track,"Speed",0),property(track,"WeightCurrent",0),property(track,"WeightTarget",0),animation and path(animation) or "?")
 end
+local function noteTrack(tool,track)
+	local priority=tostring(property(track,"Priority","?"))
+	local name=tostring(property(track,"Name","?"))
+	if not priority:find("Action",1,true) and name~="ToolNoneAnim" then return end
+	local animation=property(track,"Animation",nil)
+	local id=animation and property(animation,"AnimationId",nil)
+	if not id then return end
+	local key=tool and tool.Name or "none"
+	local row=summaries[key] or {clicks=0,assets={}} summaries[key]=row
+	row.assets[id]={priority=priority,loop=property(track,"Looped",false),name=name}
+end
 local function animatorNow()
 	local character=player.Character
 	local humanoid=character and character:FindFirstChildOfClass("Humanoid")
@@ -53,7 +70,7 @@ local function snapshot(reason)
 	if not ok then log("SNAPSHOT "..reason.." | tracks unavailable") return end
 	local tool=currentTool()
 	log("SNAPSHOT "..reason.." | equipped="..(tool and tool.Name or "none").." | active="..#tracks)
-	for _,track in ipairs(tracks) do log("  TRACK "..describe(track)) end
+	for _,track in ipairs(tracks) do noteTrack(tool,track) log("  TRACK "..describe(track)) end
 end
 local function inventoryAnimations(root)
 	local count=0
@@ -71,6 +88,7 @@ local function captureClick(tool,reason)
 	if tool==lastClickTool and os.clock()-lastClickAt<.04 then log(reason.." | same mouse action | "..tool.Name) return end
 	lastClickAt=os.clock() lastClickTool=tool
 	clicks+=1 local number=clicks
+	local row=summaries[tool.Name] or {clicks=0,assets={}} summaries[tool.Name]=row row.clicks+=1
 	log(reason.." #"..number.." "..tool.Name) snapshot("click #"..number.." immediate")
 	for _,delay in ipairs({.05,.2,.6}) do task.delay(delay,function() snapshot("click #"..number.." +"..delay) end) end
 end
@@ -94,6 +112,7 @@ local function watchAnimator(animator)
 	log("ANIMATOR "..path(animator))
 	connect(animator.AnimationPlayed,function(track)
 		local tool=currentTool()
+		noteTrack(tool,track)
 		log("PLAY | tool="..(tool and tool.Name or "none").." | "..describe(track))
 		if seenTracks[track] then return end seenTracks[track]=true
 		connect(track.Stopped,function() log("STOP | "..describe(track)) end)
@@ -118,7 +137,14 @@ local function watchCharacter(character)
 	snapshot("character initial")
 end
 local function report()
-	return table.concat(lines,"\n")..string.format("\nElapsed=%.3fs; activations=%d; observerStopped=%s\n",os.clock()-started,clicks,tostring(stopped))
+	local summary={"SUMMARY (kept even when detailed log reached its limit)"}
+	local names={} for name in pairs(summaries) do names[#names+1]=name end table.sort(names)
+	for _,name in ipairs(names) do
+		local row=summaries[name] summary[#summary+1]="TOOL "..name.." activations="..row.clicks
+		local ids={} for id in pairs(row.assets) do ids[#ids+1]=id end table.sort(ids)
+		for _,id in ipairs(ids) do local a=row.assets[id] summary[#summary+1]="  "..id.." | "..a.name.." | "..a.priority.." | loop="..tostring(a.loop) end
+	end
+	return table.concat(lines,"\n").."\n"..table.concat(summary,"\n")..string.format("\nElapsed=%.3fs; activations=%d; observerStopped=%s; detailedLogCapped=%s\n",os.clock()-started,clicks,tostring(stopped),tostring(capped))
 end
 local function copyReport()
 	local text=report()
@@ -137,7 +163,7 @@ local function label(text,y,height,size)
 	local o=Instance.new("TextLabel") o.Parent=panel o.Position=UDim2.fromOffset(14,y) o.Size=UDim2.new(1,-28,0,height) o.BackgroundTransparency=1 o.Text=text o.TextColor3=Color3.fromRGB(230,223,251) o.Font=Enum.Font.Gotham o.TextSize=size or 12 o.TextWrapped=true o.TextXAlignment=Enum.TextXAlignment.Left return o
 end
 label("Animation Probe · наблюдение",12,24,15)
-label("Возьми обычный Build, поставь 3–5 блоков.\nЗатем нажми «Завершить и скопировать».",41,37)
+label("Возьми обычные предметы: по 2–3 клика каждым.\nЗатем нажми «Завершить и скопировать».",41,37)
 status=label("Наблюдение запущено",83,20,11)
 local function button(text,x,width,callback)
 	local b=Instance.new("TextButton") b.Parent=panel b.Position=UDim2.fromOffset(x,116) b.Size=UDim2.fromOffset(width,30) b.Text=text b.Font=Enum.Font.Gotham b.TextSize=11 b.TextColor3=Color3.fromRGB(244,238,255) b.BackgroundColor3=Color3.fromRGB(91,65,149) b.BorderSizePixel=0
