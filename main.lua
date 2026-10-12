@@ -372,7 +372,7 @@ local function setBuildContent(value, keepRotationPivot)
 	if StudioHooks.content then StudioHooks.content(value) end
 	invalidatePreparedPlan()
 	local displayValue=value:gsub("%|%|","|\n|")
-	setEditorDisplay(#value <= 60000 and displayValue or ("[Loaded " .. #value .. " characters; COPY exports the full build]"))
+	setEditorDisplay(displayValue)
 	saveData()
 end
 
@@ -469,12 +469,10 @@ local function setStatus(message, failure)
 	if unloaded then return end
 	message=tostring(message or "")
 	if storageError then message=message.." · вкладки не записаны в файл" end
-	statusLabel.Text=message
-	statusLabel.TextColor3=failure and C_RED or C_WHITE
 	diagnosticLog[#diagnosticLog+1]=os.date("%H:%M:%S").." "..message
-	if StudioHooks.status then StudioHooks.status() end
 	if #diagnosticLog>100 then table.remove(diagnosticLog,1) end
-	if failure then warn("AUTOBUILD: "..message) end
+	if StudioHooks.status then StudioHooks.status() end
+	if failure then warn("AUTOBUILD: "..message) else print("AUTOBUILD: "..message) end
 end
 local function copyText(text)
 	local writer=setclipboard or (syn and syn.set_clipboard) or (Clipboard and Clipboard.set)
@@ -1204,7 +1202,7 @@ btnNextChunk.MouseButton1Click:Connect(function()
 	if not _G.buildChunks or not _G.currentChunk then return end
 	_G.currentChunk = math.min(_G.currentChunk + 1, _G.totalChunks)
 	if not copyText(_G.buildChunks[_G.currentChunk]) then setStatus("Буфер обмена недоступен", true) return end
-	setEditorDisplay("[Chunk " .. _G.currentChunk .. "/" .. _G.totalChunks .. " copied!]")
+	setStatus("Часть " .. _G.currentChunk .. "/" .. _G.totalChunks .. " скопирована")
 	if _G.currentChunk == _G.totalChunks then
 		btnNextChunk.Visible = false
 	end
@@ -3128,7 +3126,7 @@ local welcomeFoot=label(UI.welcome,"R — режим инструмента     
 footerFrame.Position=UDim2.new(0,108,1,-46) footerFrame.Size=UDim2.new(1,-128,0,40)
 statDisplay.Size=UDim2.new(.65,0,0,18) statDisplay.TextSize=10 statDisplay.TextXAlignment=Enum.TextXAlignment.Left skin(statDisplay,nil,"muted")
 perfDisplay.Position=UDim2.new(.65,0,0,0) perfDisplay.Size=UDim2.new(.35,0,0,18) perfDisplay.TextSize=10 perfDisplay.TextXAlignment=Enum.TextXAlignment.Right skin(perfDisplay,nil,"muted")
-statusLabel.Position=UDim2.fromOffset(0,21) statusLabel.Size=UDim2.new(1,0,0,18) statusLabel.TextSize=10 statusLabel.TextWrapped=false statusLabel.TextTruncate=Enum.TextTruncate.AtEnd statusLabel.TextXAlignment=Enum.TextXAlignment.Left statusLabel.Active=true skin(statusLabel,nil,"muted")
+statusLabel.Text="" statusLabel.Visible=false statusLabel.Active=false
 local console=create("Frame",{Name="ConsoleDrawer",Parent=bodyFrame,Position=UDim2.new(0,108,1,-292),Size=UDim2.new(1,-128,0,188),BackgroundColor3=C_GRAY,Visible=false,ZIndex=40}) skin(console,"panel") corners(console,8) stroke(console)
 local consoleTitle=label(console,"ЖУРНАЛ",UDim2.fromOffset(14,8),UDim2.fromOffset(160,22),10,"muted","medium") consoleTitle.ZIndex=41
 local closeConsole=button(console,"×",UDim2.new(1,-38,0,6),UDim2.fromOffset(28,26),"deep") closeConsole.ZIndex=41
@@ -3144,7 +3142,6 @@ end
 StudioHooks.status=function() if console.Visible then refreshConsole() end end
 local function toggleConsole() console.Visible=not console.Visible if console.Visible then refreshConsole() end end
 trackConn(consoleBtn.MouseButton1Click:Connect(toggleConsole)) trackConn(closeConsole.MouseButton1Click:Connect(function() console.Visible=false end))
-trackConn(statusLabel.InputBegan:Connect(function(input) if input.UserInputType==Enum.UserInputType.MouseButton1 then toggleConsole() end end))
 local appearance=create("Frame",{Name="Appearance",Parent=bodyFrame,Position=UDim2.fromOffset(108,50),Size=UDim2.new(1,-128,1,-108),BackgroundColor3=C_GRAY,Visible=false}) skin(appearance,"deep") corners(appearance,8)
 label(appearance,"Вид рабочего пространства",UDim2.fromOffset(28,24),UDim2.new(1,-56,0,34),22,"text","strong")
 label(appearance,"Тёмная тема, фиолетовый космос и тёплый акцент загрузки.",UDim2.fromOffset(28,66),UDim2.new(1,-56,0,28),12,"muted")
@@ -3466,9 +3463,9 @@ return UI
 	loadScene=function(code)
 		if sceneLoading then pendingContent=code return false end
 		pendingContent=nil
-		if loadedContent==code and lastContentTab==activeTabIndex and loadedOffset==(_G.buildOffset or Vector3.zero) then return true end
+		if loadedContent==code and lastContentTab==activeTabIndex and loadedOffset==(_G.buildOffset or Vector3.zero) then sceneInvalid=false return true end
 		local blocks,invalid=parseBlocks(code,_G.buildOffset or Vector3.zero)
-		if invalid>0 then sceneInvalid=true setStatus("Код содержит ошибки; мастерская не заменена",true) return false end
+		if invalid>0 then sceneInvalid=true setStatus("Импорт мастерской отклонён: некорректных записей "..invalid..", распознано деталей "..#blocks..". Исходная вкладка сохранена.",true) return false end
 		sceneLoading=true sceneInvalid=false
 		local tab=activeTabIndex
 		local offset=_G.buildOffset or Vector3.zero
@@ -3513,8 +3510,10 @@ return UI
 		end
 		for _,h in pairs(highlights) do h.Visible=creating end
 	end
+	local ToolView
 	local setMode
 	local function releaseTool()
+		if ToolView then ToolView.clear() end
 		activeTool=nil held=false pressPoint=nil
 		local backpack=LocalPlayer:FindFirstChildOfClass("Backpack")
 		for _,tool in pairs(tools) do if tool.Parent and tool.Parent==LocalPlayer.Character and backpack then tool.Parent=backpack end end
@@ -3522,8 +3521,20 @@ return UI
 	setMode=function(nextMode)
 		if blocked() then setStatus("Сначала поставь строительство на паузу",true) return end
 		if nextMode=="create" and mode~="create" then
+			local code=_G.fullBuildString or textBox.Text
+			local _,invalid=parseBlocks(code,Vector3.zero)
+			if invalid>0 then
+				local originalName=tabsData[activeTabIndex].name
+				local used={} for _,tab in ipairs(tabsData) do used[tab.name]=true end
+				local name="Мастерская" local suffix=1
+				while used[name] do name="Мастерская "..suffix suffix+=1 end
+				tabsData[#tabsData+1]={name=name,content=""} activeTabIndex=#tabsData
+				_G.buildOffset=Vector3.zero setBuildContent("")
+				setStatus("Создана пустая мастерская «"..name.."». Вкладка «"..originalName.."» сохранена без изменений; некорректных записей: "..invalid,true)
+				code=""
+			end
 			cleanupVisuals(true)
-			if not loadScene(_G.fullBuildString or textBox.Text) then return end
+			if not loadScene(code) then return end
 		elseif mode=="create" and nextMode~="create" then
 			if not sceneInvalid then commit() end
 			releaseTool() clearSelection()
@@ -3649,19 +3660,146 @@ return UI
 		toolHint.Text=hints[name]
 		-- Responsive labels are handled by View.tool.
 		if equip then
+			ToolView.refresh()
 			local hum=LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
 			if hum and tools[name] then hum:EquipTool(tools[name]) end
 		end
 	end
+	ToolView=(function()
+local V={}
+local sourceNames={mbuild={"Build"},mpaint={"Paint"},mdelete={"Delete"},msize={"Shape","Size"},mchoose={"Choose","Select"}}
+local data=setmetatable({},{__mode="k"})
+local tracks={}
+local reported={}
+local function sourceFor(name)
+	for i=1,2 do
+		local container
+		if i==1 then container=LocalPlayer.Character else container=LocalPlayer:FindFirstChildOfClass("Backpack") end
+		if container then for _,sourceName in ipairs(sourceNames[name] or {}) do local source=container:FindFirstChild(sourceName) if source and source:IsA("Tool") then return source end end end
+	end
+end
+local function physical(part)
+	part.Anchored=false part.CanCollide=false part.CanTouch=false part.CanQuery=false part.Massless=true
+	part.LocalTransparencyModifier=0
+end
+local function fallback(tool,name)
+	local colours={mbuild=Color3.fromRGB(177,147,255),mpaint=Color3.fromRGB(128,196,255),mdelete=Color3.fromRGB(244,115,141),msize=Color3.fromRGB(241,205,137),mchoose=Color3.fromRGB(148,230,207)}
+	local sizes={mbuild=Vector3.new(.8,.8,.8),mpaint=Vector3.new(.22,1,.22),mdelete=Vector3.new(.65,.65,.65),msize=Vector3.new(1,.2,.3),mchoose=Vector3.new(.55,.55,.55)}
+	local h=create("Part",{Name="Handle",Parent=tool,Size=sizes[name],Color=colours[name],Material=Enum.Material.SmoothPlastic,Transparency=0,TopSurface=Enum.SurfaceType.Smooth,BottomSurface=Enum.SurfaceType.Smooth})
+	physical(h)
+	if name=="mpaint" then
+		local head=create("Part",{Name="Brush",Parent=h,Size=Vector3.new(.6,.32,.3),Color=Color3.fromRGB(183,146,255),Material=Enum.Material.SmoothPlastic,CFrame=h.CFrame*CFrame.new(0,.55,0)}) physical(head)
+		create("WeldConstraint",{Parent=h,Part0=h,Part1=head})
+	elseif name=="mchoose" then create("SelectionBox",{Parent=h,Adornee=h,Color3=colours[name],LineThickness=.04,SurfaceTransparency=1}) end
+	return h
+end
+function V.decorate(tool,name)
+	local source=sourceFor(name)
+	local info=data[tool]
+	if info and info.source==source and tool:FindFirstChild("Handle") then return end
+	if tool.Parent==LocalPlayer.Character then return end
+	local old=tool:FindFirstChild("Handle") if old then old:Destroy() end
+	local h=nil
+	local original=source and source:FindFirstChild("Handle")
+	if original and original:IsA("BasePart") then
+		local ok,copy=pcall(function() return original:Clone() end)
+		if ok and copy then
+			h=copy
+			-- Only appearance data survives. Never copy behaviour, remotes,
+			-- external joints, physical actuators or activation callbacks.
+			for _,o in ipairs(h:GetDescendants()) do
+				if not (o:IsA("BasePart") or o:IsA("DataModelMesh") or o:IsA("Decal") or o:IsA("Texture") or o:IsA("SurfaceAppearance") or o:IsA("Attachment") or o:IsA("Folder") or o:IsA("Model")) then o:Destroy() end
+			end
+			physical(h) h.Transparency=math.min(h.Transparency,.35)
+			for _,o in ipairs(h:GetDescendants()) do if o:IsA("BasePart") then physical(o) create("WeldConstraint",{Parent=h,Part0=h,Part1=o}) end end
+			h.Name="Handle" h.Parent=tool
+			tool.Grip=source.Grip
+		end
+	end
+	if not h then h=fallback(tool,name) end
+	tool.RequiresHandle=true
+	tool:SetAttribute("ImaginaryTool",true)
+	data[tool]={source=source,lastAction=-math.huge}
+end
+function V.refresh()
+	for name,tool in pairs(tools) do if tool.Parent and tool.Parent~=LocalPlayer.Character then V.decorate(tool,name) end end
+end
+local function findAnimation(tool,kind)
+	local info=data[tool]
+	local source=info and info.source
+	if source and source.Parent then
+		for _,a in ipairs(source:GetDescendants()) do
+			if a:IsA("Animation") and a.AnimationId~="" then
+				local name=a.Name:lower()
+				local idle=name:find("idle",1,true) or name:find("hold",1,true) or name:find("toolnone",1,true)
+				local equip=name:find("equip",1,true) and not name:find("unequip",1,true)
+				local action=name:find("activate",1,true) or name:find("action",1,true) or name:find("slash",1,true) or name:find("use",1,true) or name:find("click",1,true) or name:find("build",1,true) or name:find("paint",1,true)
+				if kind=="idle" and idle or kind=="action" and action and not idle or kind=="equip" and equip then return a end
+			end
+		end
+	end
+	if kind=="equip" then return nil end
+	local character=LocalPlayer.Character
+	local animate=character and character:FindFirstChild("Animate")
+	local folder=animate and animate:FindFirstChild(kind=="idle" and "toolnone" or "toolslash")
+	if folder then for _,a in ipairs(folder:GetDescendants()) do if a:IsA("Animation") and a.AnimationId~="" then return a end end end
+end
+local function play(tool,kind)
+	local character=LocalPlayer.Character
+	local hum=character and character:FindFirstChildOfClass("Humanoid")
+	local animator=hum and hum:FindFirstChildOfClass("Animator")
+	local animation=findAnimation(tool,kind)
+	if not animator or not animation then return end
+	local key=animation.AnimationId
+	local owned=tracks[tool] or {} tracks[tool]=owned
+	local entry=owned[kind]
+	if entry and (entry.animator~=animator or entry.id~=key) then pcall(function() entry.track:Stop(.1) entry.track:Destroy() end) owned[kind]=nil entry=nil end
+	-- Standard Animate may already be playing the same pose; leave it alone.
+	local ok,playing=pcall(function() return animator:GetPlayingAnimationTracks() end)
+	if kind=="idle" and ok then for _,t in ipairs(playing) do if t.Animation and t.Animation.AnimationId==key and t.IsPlaying then return end end end
+	if not entry then
+		local loaded,track=pcall(function() return animator:LoadAnimation(animation) end)
+		if not loaded then if not reported[key] then reported[key]=true setStatus("Анимация предмета недоступна: "..key,true) end return end
+		entry={id=key,animator=animator,track=track} owned[kind]=entry
+	end
+	pcall(function()
+		entry.track.Priority=kind=="idle" and Enum.AnimationPriority.Idle or Enum.AnimationPriority.Action
+		entry.track.Looped=kind=="idle"
+		if not entry.track.IsPlaying then entry.track:Play(.1) end
+	end)
+end
+function V.equipped(tool,name)
+	V.clear(tool)
+	if mode=="create" and tool.Parent==LocalPlayer.Character then play(tool,"equip") end
+	task.defer(function() if not unloaded and mode=="create" and tool.Parent==LocalPlayer.Character and activeTool==name then play(tool,"idle") end end)
+end
+function V.activated(tool)
+	if mode~="create" or blocked() or not tool.Parent or tool.Parent~=LocalPlayer.Character then return end
+	local info=data[tool] if not info or os.clock()-info.lastAction<.35 then return end info.lastAction=os.clock()
+	play(tool,"action")
+end
+function V.clear(only)
+	for tool,owned in pairs(tracks) do
+		if not only or only==tool then
+			for _,entry in pairs(owned) do pcall(function() entry.track:Stop(.1) entry.track:Destroy() end) end
+			tracks[tool]=nil
+		end
+	end
+end
+return V
+
+	end)()
 	local function installTools()
 		local backpack=LocalPlayer:FindFirstChildOfClass("Backpack")
 		if not backpack then return end
 		for _,name in ipairs(toolNames) do
 			if not tools[name] or not tools[name].Parent then
-				local tool=create("Tool",{Name=name,ToolTip="Мнимый bkit · "..toolLabels[name],RequiresHandle=false,CanBeDropped=false,Enabled=mode=="create",Parent=backpack})
+				local tool=create("Tool",{Name=name,ToolTip="Мнимый bkit · "..toolLabels[name],RequiresHandle=true,CanBeDropped=false,Enabled=mode=="create"})
 				tools[name]=tool
-				trackConn(tool.Equipped:Connect(function() setTool(name,false) end))
-				trackConn(tool.Unequipped:Connect(function() if activeTool==name then activeTool=nil held=false end end))
+				ToolView.decorate(tool,name) tool.Parent=backpack
+				trackConn(tool.Activated:Connect(function() ToolView.activated(tool) end))
+				trackConn(tool.Equipped:Connect(function() setTool(name,false) ToolView.equipped(tool,name) end))
+				trackConn(tool.Unequipped:Connect(function() ToolView.clear(tool) if activeTool==name then activeTool=nil held=false end end))
 			end
 		end
 	end
@@ -3840,6 +3978,7 @@ return UI
 		end
 	end))
 	StudioHooks.close=function()
+		ToolView.clear()
 		sceneRevision+=1
 		persistHistory()
 		for _,tool in pairs(tools) do tool:Destroy() end

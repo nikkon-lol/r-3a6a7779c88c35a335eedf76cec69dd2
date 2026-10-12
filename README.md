@@ -11,3 +11,11 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/nikkon-lol/r-3a6a7779
 Текущая версия: Autobuild Studio v5 / ORBIT. Управление и возможности — [GUIDE.md](GUIDE.md).
 
 Файл `loader.lua` содержит ту же команду. Старый вариант с личным ключом больше не требуется. Случайное имя не ограничивает доступ: репозиторий виден в профиле владельца, а файлы доступны любому со ссылкой.
+
+Для наблюдения за анимациями обычного Build:
+
+```lua
+loadstring(game:HttpGet("https://raw.githubusercontent.com/nikkon-lol/r-3a6a7779c88c35a335eedf76cec69dd2/main/animation-probe.lua"))()
+```
+
+Тест сам не строит и не проигрывает анимации. Возьми настоящий Build, постой с ним, поставь 3–5 блоков вручную, затем нажми «Завершить и скопировать». Отчёт также сохраняется в `Autobuild-animation-report.txt`.

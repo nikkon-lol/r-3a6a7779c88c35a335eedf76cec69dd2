@@ -8,3 +8,4 @@ plan-*.json
 *.plan
 AutobuildPlanLibrary.json
 AutobuildAppearance.json
+Autobuild-animation-report.txt
