@@ -795,7 +795,7 @@ local function updateDefaultStats()
 end
 
 btnLog.MouseButton1Click:Connect(function()
-	local text="Autobuild Studio v5 / ORBIT · stairwell-18\n"..table.concat(diagnosticLog,"\n")
+	local text="Autobuild Studio v5 / ORBIT · stairwell-19\n"..table.concat(diagnosticLog,"\n")
 	if storageError then text=text.."\nStorage: "..storageError end
 	if copyText(text) then setStatus("Диагностика скопирована") else setStatus("Буфер обмена недоступен",true) end
 end)
@@ -2308,6 +2308,7 @@ local function sameColor(a, b)
 	return math.abs(a.R-b.R) <= 1/255+.0001 and math.abs(a.G-b.G) <= 1/255+.0001 and math.abs(a.B-b.B) <= 1/255+.0001
 end
 local function paintBlock(brick, data)
+	if StudioHooks.stairwell and data.stairToxic then if data.stairToxic.defer then return StudioHooks.stairwell.paintShell(brick,data,paintBlock) end return StudioHooks.stairwell.paintToxic(brick,data) end
 	local function matches() return brick.Parent and sameColor(brick.Color, data.color) and brick.Material == data.material end
 	if matches() then return true end
 	for _ = 1, 3 do
@@ -2671,6 +2672,7 @@ local function snapshotWorld(session,geometryOnly,focus)
 			if not id then session.nextWorld=session.nextWorld+1 id="w:"..session.nextWorld session.ids[brick]=id end
 			local opaque=not geometryOnly and (brick.Transparency<.001 or (brick.Material==Enum.Material.Glass and math.abs(brick.Transparency-.5)<.001))
 			local eligible=not geometryOnly and (not StudioHooks.documents or not StudioHooks.documents.pendingPart(session,brick)) and own and brick:IsDescendantOf(own) and identity and brick.Anchored and opaque and brick:IsA("Part") and brick.Shape==Enum.PartType.Block and SymbolToMaterial[MaterialSymbols[brick.Material]]~=nil
+			if brick:GetAttribute("OrbitStairHazard") then eligible=false end
 			local model={id=id,pos=brick.Position,size=worldSize,color=brick.Color,material=brick.Material,collide=brick.CanCollide,sprays=geometryOnly and {} or readSprays(brick),instance=brick,external=true,eligible=eligible==true and not session.helpers[brick] and not unfinished[brick]}
 			result[#result+1]=model
 			if model.eligible and not session.helpers[brick] then sources[#sources+1]=model end
@@ -3046,9 +3048,8 @@ function PlanLibrary.prepare(targets,scene,options)
 	if selected=="auto" then
 		local id=PlanLibrary.id()
 		if type(id)=="string" and id:sub(1,10)=="stairwell_" then
-			local order={} for i in ipairs(targets) do order[i]=i end
-			local plan=Planner.prepareOrdered(targets,scene,options,order)
-			plan.name="Stairwell · этажи по порядку" plan.stairwell=true return plan
+            local plan=StudioHooks.stairwell.fastPlan(targets,scene,options)
+            plan.stairwell=true return plan
 		end
 		return Planner.prepare(targets,scene,options)
 	end
@@ -3352,8 +3353,9 @@ local function instanceModel(brick,id)
 	return {id=id,pos=brick.Position,size=brick.Size,color=brick.Color,material=brick.Material,collide=brick.CanCollide,sprays=readSprays(brick),instance=brick,eligible=true}
 end
 local function matchesAll(brick,data)
+	if StudioHooks.stairwell and data.stairToxic and not data.stairToxic.defer and not StudioHooks.stairwell.toxicReady(brick,data) then return false end
 	if StudioHooks.guard and StudioHooks.guard.formChanged(brick,data) then return false end
-	if not geometryMatches(brick,data) or not brick.Anchored or not sameColor(brick.Color,data.color) or brick.Material~=data.material or brick.CanCollide~=data.canCollide then return false end
+	if not geometryMatches(brick,data) or not brick.Anchored or not sameColor(brick.Color,data.color) or not (StudioHooks.stairwell and data.stairToxic and StudioHooks.stairwell.materialMatches(brick,data) or not data.stairToxic and brick.Material==data.material) or brick.CanCollide~=data.canCollide then return false end
 	local sprays=readSprays(brick)
 	if #sprays~=#data.sprays then return false end
 	for _,wanted in ipairs(data.sprays) do
@@ -4468,6 +4470,7 @@ local function runBuilderEngine(buildString,offset,prepareOnly)
 	end
 	if resumeSession.recoveryBlocked then return false,resumeSession.recoveryBlocked end
 	local session=resumeSession
+	if StudioHooks.stairwell and StudioHooks.guard.preserve(session) then StudioHooks.stairwell.bind(session) if not prepareOnly then StudioHooks.stairwell.beginBuild(session) end end
 	if StudioHooks.documents then StudioHooks.documents.stash(session) end
 	session.activeIndex=nil
 	if session.plan and session.plan.plannerVersion~=Planner.version then session.plan=nil session.planByIndex=nil session.previewInvalid=true end
@@ -4589,6 +4592,7 @@ local function runBuilderEngine(buildString,offset,prepareOnly)
 	if _G.autobuildPlaced<#session.blocks then
 		return false,string.format("Обход завершён: готово %d/%d · пропущено %d · ожидают восстановления %d. Продолжить / переделать проблемный блок.",_G.autobuildPlaced,#session.blocks,skipped,#session.blocks-_G.autobuildPlaced-skipped)
 	end
+	if StudioHooks.stairwell and StudioHooks.guard.preserve(session) then local ok,err=StudioHooks.stairwell.activatePits(session) if not ok then return false,err end end
 	return true,string.format("Готово: %d блоков · созданий %d · изменений граней %d · удалений временных %d",#session.blocks,session.actual.creates,session.actual.shapes,session.actual.deletes)
 end
 local function launchAction(forcePreparation)
@@ -4603,7 +4607,7 @@ local function launchAction(forcePreparation)
 	if #blocks==0 or invalid>0 then setStatus("Некорректная постройка",true) return end
 	local offset=snapBuildOffset(_G.buildOffset or Vector3.zero)
 	local prepared=resumeSession and resumeSession.text==text and resumeSession.offset==offset and resumeSession.plan~=nil and not resumeSession.previewInvalid
-	local prepareOnly=false
+	local prepareOnly=forcePreparation=="stairwellPreview"
 	if forcePreparation and prepared then resumeSession.plan=nil end
 	_G.buildOffset=offset _G.stopautobuild=false _G.autobuildRunning=true
 	_G.autobuildTotal=#blocks _G.autobuildPlaced=0
@@ -4613,12 +4617,13 @@ local function launchAction(forcePreparation)
 	task.spawn(function()
 		local ok,finished,message=pcall(runBuilderEngine,text,offset,prepareOnly)
 		if resumeSession and not unloaded then resumeSession.activeIndex=nil pcall(StudioHooks.recovery.capture,resumeSession,"flush") end
-		pcall(unlockPosition) pcall(stopToolForcing) pcall(disableNoclip) isBuilding=false
+		pcall(unlockPosition) if StudioHooks.stairwell then StudioHooks.stairwell.returnCharacter() end pcall(stopToolForcing) pcall(disableNoclip) isBuilding=false
 		if StudioHooks.guard then StudioHooks.guard.autoExecuting=false end
 		if unloaded then return end
 		_G.autobuildRunning=false textBox.TextEditable=true btnStart.TextColor3=C_WHITE
 		btnStart.Text=ok and finished and (prepareOnly and "СТРОИТЬ ПО ПЛАНУ" or "СТРОИТЬ") or "ПРОДОЛЖИТЬ"
 		if ok and finished and not prepareOnly then cleanupVisuals(true) end
+		if prepareOnly and StudioHooks.stairwell then StudioHooks.stairwell.onPrepared(resumeSession,ok and finished,ok and message or tostring(finished)) end
 		setStatus(ok and message or tostring(finished),not ok or not finished and not _G.stopautobuild)
 		statDisplay.Text=prepareOnly and ok and finished and ("План · действий ~"..resumeSession.plan.operations) or string.format("Готово: %d/%d",_G.autobuildPlaced or 0,#blocks)
 		if StudioHooks.documents then StudioHooks.documents.flushUI() end
@@ -5180,19 +5185,19 @@ end)()
 
 -- Bounded layout search, once before building. Never picks up or removes world parts.
 StudioHooks.stairwell=(function()
-	local S={busy=false,job=0,message="Этажи → preview → строительство",options={floors=3,rise=16}}
+	local S={busy=false,job=0,message="Спуск, развилки и закрытые провалы",options={floors=6,rise=16,seed=math.random(1,1000000)},metadata={}}
 	if readfile and isfile then pcall(function() if isfile("OrbitStairwell.json") then local saved=HttpService:JSONDecode(readfile("OrbitStairwell.json")) if type(saved)=="table" then S.options=saved end end end) end
 	local function status(message,failure)
 		S.message=message if StudioHooks.stairStatus then StudioHooks.stairStatus(message) end setStatus(message,failure)
 	end
 	function S.configure(options)
-		local floors,rise=tonumber(options.floors),tonumber(options.rise)
-		if not floors or floors~=floors or not rise or rise~=rise then return nil,"Введи числа" end
-		local result={floors=math.clamp(math.round(floors),1,64),rise=math.clamp(math.round(rise/4)*4,12,24)}
+		local floors,rise,seed=tonumber(options.floors),tonumber(options.rise),tonumber(options.seed) or S.options.seed or 1
+		if not floors or floors~=floors or not rise or rise~=rise or seed~=seed then return nil,"Введи числа" end
+		local result={floors=math.clamp(math.round(floors),1,64),rise=math.clamp(math.round(rise/4)*4,12,24),seed=math.clamp(math.round(seed),1,1000000000)}
 		S.options=result if writefile then pcall(function() writefile("OrbitStairwell.json",HttpService:JSONEncode(result)) end) end
 		return result
 	end
-	if not S.configure(S.options) then S.configure({floors=3,rise=16}) end
+	if not S.configure(S.options) then S.configure({floors=6,rise=16,seed=1}) end
 	local function box(lo,hi) return {pos=(lo+hi)/2,size=hi-lo} end
 	local function bounds(rows)
 		local lo,hi
@@ -5202,73 +5207,324 @@ StudioHooks.stairwell=(function()
 		end
 		return box(lo,hi)
 	end
-	function S.module(origin,direction,rise,level,turn)
-		local rows,routes={},{} local right=Vector3.new(direction.Z,0,-direction.X)
+	-- Coarse boxes and uneven joins intentionally follow the 9mzee example.
+	-- Translate/quarter-turn independent metadata; editing/reordering invalidates it.
+	local function turn(p,q) if q==1 then return Vector3.new(-p.Z,p.Y,p.X) elseif q==2 then return Vector3.new(-p.X,p.Y,-p.Z) elseif q==3 then return Vector3.new(p.Z,p.Y,-p.X) end return p end
+	local function signature(models,q)
+		if #models==0 then return end
+		local function clean(n) return math.abs(n)<.0005 and 0 or n end
+		local anchor=models[1].pos local a,b=1,7
+		for _,m in ipairs(models) do
+			if #(m.sprays or {})>0 then return end
+			local p=turn(m.pos-anchor,q) local s=q%2==1 and Vector3.new(m.size.Z,m.size.Y,m.size.X) or m.size
+			local key=string.format("%.3f,%.3f,%.3f/%.3f,%.3f,%.3f/%s/%s/%s;",clean(p.X),clean(p.Y),clean(p.Z),s.X,s.Y,s.Z,colorHex(m.color),tostring(m.material),tostring(m.collide))
+			for i=1,#key do local n=key:byte(i) a=(a*65599+n)%2147483647 b=(b*131+n)%2147483629 end
+		end
+		return tostring(#models)..":"..a..":"..b
+	end
+	local function metaFile(id) if type(id)=="string" and id:match("^stairwell_[%w_%-]+$") then return "OrbitStairwell_"..id..".json" end end
+	function S.saveMeta(meta)
+		if not writefile then return true end
+		local file=metaFile(meta.id) if not file then return false end
+		return pcall(function() writefile(file,HttpService:JSONEncode(meta)) end)
+	end
+	function S.loadMeta(id)
+		if S.metadata[id] then return S.metadata[id] end
+		local file=metaFile(id) if not file or not readfile or not isfile or not isfile(file) then return end
+		local ok,v=pcall(function() return HttpService:JSONDecode(readfile(file)) end)
+		if ok and type(v)=="table" and v.version==2 and v.id==id and type(v.keys)=="table" and type(v.hazards)=="table" and type(v.states)=="table" then S.metadata[id]=v return v end
+	end
+	function S.remember(id,code,path)
+		local parsed,invalid=parseBlocks(code,Vector3.zero) if invalid>0 then error("Некорректный Stairwell",0) end
+		local models={} for i,b in ipairs(parsed) do models[i]=targetModel(b,i) end
+		local meta={version=2,id=id,keys={},hazards={},states={}}
+		for q=0,3 do meta.keys[q+1]=signature(models,q) end
+		local index=0 for _,floor in ipairs(path) do for _,r in ipairs(floor.rows) do index+=1 if r.hazard then meta.hazards[#meta.hazards+1]=index end end end
+		S.metadata[id]=meta local ok,err=S.saveMeta(meta) if not ok then error("Не удалось сохранить ловушки: "..tostring(err),0) end
+		return meta
+	end
+	function S.bind(session)
+		if session.stairBoundText==session.text and session.stairBoundOffset==session.offset then
+			for _,d in ipairs(session.blocks) do if d.stairToxic then d.stairToxic.defer=true end end
+			return
+		end
+		for i,d in ipairs(session.blocks) do d.stairToxic=nil session.models[i].eligible=true end
+		session.stairBoundText=session.text session.stairBoundOffset=session.offset session.stairMeta=nil
+		local meta=S.loadMeta(session.buildId) if not meta then return end
+		local key=signature(session.models,0) local matches=false for _,v in ipairs(meta.keys) do if v==key then matches=true break end end
+		if not matches then status("Stairwell изменён: метки toxic отключены; создай новый вариант для новых ловушек",true) return end
+		session.stairMeta=meta
+		for _,index in ipairs(meta.hazards) do if type(index)=="number" and index%1==0 and session.blocks[index] then
+			local d=session.blocks[index] d.stairToxic={id=meta.id,index=index,defer=true} session.models[index].eligible=false
+			if not d.placedBrick then
+				local root=workspace:FindFirstChild("Bricks") local own=getPlayerBricksFolder() local found,ambiguous
+				if root and own and meta.states[tostring(index)] then for _,p in ipairs(StudioHooks.liveWorld.query(root,session.models[index])) do
+					if p.Parent and p:IsDescendantOf(own) and p:GetAttribute("OrbitStairHazard")==meta.id..":"..index and geometryMatches(p,d) then if found then ambiguous=true break end found=p end
+				end end
+				if found and not ambiguous then d.placedBrick=found d.brick=found session.ids[found]="t:"..index session.instances["t:"..index]=found end
+			end
+		end end
+	end
+	local function knownOwn(brick,data)
+		local folder=getPlayerBricksFolder()
+		return folder and brick and brick.Parent and brick:IsDescendantOf(folder) and (not data.placedBrick or data.placedBrick==brick) and geometryMatches(brick,data)
+	end
+	function S.toxicReady(brick,data)
+		local tag=data.stairToxic if not tag then return true end
+		local meta=S.metadata[tag.id] local record=meta and meta.states[tostring(tag.index)]
+		return knownOwn(brick,data) and record and record.phase=="confirmed" and brick:GetAttribute("OrbitStairToxic")==tag.id..":"..tag.index
+	end
+	function S.materialMatches(brick,data)
+		if not data.stairToxic or not data.stairToxic.defer then return brick.Material==data.material end
+		return brick.Material==(S.toxicReady(brick,data) and Enum.Material.Neon or Enum.Material.Brick)
+	end
+	function S.paintShell(brick,data,ordinaryPaint)
+		if not knownOwn(brick,data) or data.placedBrick~=brick then return false end
+		local tag=data.stairToxic local meta=S.metadata[tag.id] if not meta then return false end
+		local id=tag.id..":"..tag.index local key=tostring(tag.index) local record=meta.states[key]
+		if not record or brick:GetAttribute("OrbitStairHazard")~=id then record={phase="shell"} meta.states[key]=record brick:SetAttribute("OrbitStairHazard",id) S.saveMeta(meta) end
+		if record.phase=="sent" then
+			if not waitUntil(function() return brick.Parent and brick.Material==Enum.Material.Neon end,responseTimeout(2)) then return false end
+			record.phase="confirmed" brick:SetAttribute("OrbitStairToxic",id) S.saveMeta(meta)
+		elseif record.phase=="reset" then
+			if not waitUntil(function() return brick.Parent and brick.Material==Enum.Material.Brick end,responseTimeout(2)) then return false end
+			record.phase="shell" S.saveMeta(meta)
+		end
+		if S.toxicReady(brick,data) and brick.Material==Enum.Material.Neon and sameColor(brick.Color,data.color) then return true end
+		local shell=table.clone(data) shell.stairToxic=nil shell.material=Enum.Material.Brick
+		return ordinaryPaint(brick,shell)
+	end
+	function S.beginBuild(session)
+		local root=getValidHRP() if root then S.returnRoot=root S.returnPose=root.CFrame S.returnChar=LocalPlayer.Character end
+	end
+	function S.returnCharacter()
+		local root=S.returnRoot
+		if root and root.Parent and S.returnChar==LocalPlayer.Character then pcall(function() root.CFrame=S.returnPose end) end
+		S.returnRoot=nil S.returnPose=nil S.returnChar=nil
+	end
+	function S.paintToxic(brick,data)
+		if not knownOwn(brick,data) or data.placedBrick~=brick then return false end
+		local tag=data.stairToxic local meta=tag and S.metadata[tag.id] if not meta then return false end
+		local id=tag.id..":"..tag.index local key=tostring(tag.index)
+		local record=meta.states[key]
+		if not record or brick:GetAttribute("OrbitStairHazard")~=id then record={} meta.states[key]=record brick:SetAttribute("OrbitStairHazard",id) end
+		local function waitMaterial(mat) return waitUntil(function() return brick.Parent and brick.Material==mat end,responseTimeout(2)) end
+		if S.toxicReady(brick,data) and brick.Material==Enum.Material.Neon and sameColor(brick.Color,data.color) then return true end
+		if not ensureNear(brick.Position,nil,true) then return false end
+		local tool,hrp=awaitTool("Paint"),getValidHRP() if not tool or not hrp or cancelled() then return false end
+		local function send(phase,material)
+			record.phase=phase
+			local ok=S.saveMeta(meta) if not ok then return false end
+			return pcall(function() tool.event:FireServer(brick,Enum.NormalId.Top,hrp.Position,"both 🤝",data.color,material,"") end)
+		end
+		-- Neon alone cannot acknowledge toxic. Observe a real material transition.
+		if record.phase=="reset" then if not waitMaterial(Enum.Material.Brick) then return false end record.phase=nil end
+		if record.phase~="sent" and brick.Material==Enum.Material.Neon then
+			if not send("reset","bricks") or not waitMaterial(Enum.Material.Brick) then return false end record.phase=nil
+		end
+		if record.phase~="sent" then if not send("sent","toxic") then return false end end
+		if not waitMaterial(Enum.Material.Neon) or not knownOwn(brick,data) or not sameColor(brick.Color,data.color) then return false end
+		record.phase="confirmed" brick:SetAttribute("OrbitStairToxic",id) S.saveMeta(meta)
+		return true
+	end
+	function S.activatePits(session)
+		local list={} for i,d in ipairs(session.blocks) do if d.stairToxic then d.stairToxic.defer=false list[#list+1]={index=i,data=d} end end
+		table.sort(list,function(a,b) return a.data.centerPos.Y<b.data.centerPos.Y end)
+		local failed=0
+		for n,item in ipairs(list) do
+			local data=item.data local i=item.index
+			local ok=not cancelled() and S.paintToxic(data.placedBrick,data)
+			if ok then
+				if not session.done[i] then session.done[i]=true _G.autobuildPlaced+=1 end
+				data.failure=nil data.guardDamage=nil data.guardFailures=nil data.guardRetryAt=nil
+				if StudioHooks.guard then StudioHooks.guard.queue[i]=nil end
+			else
+				failed+=1 if session.done[i] then session.done[i]=nil _G.autobuildPlaced=math.max(0,_G.autobuildPlaced-1) end
+				data.failure="Toxic не подтверждён; дно сохранено, продолжи строительство"
+			end
+			StudioHooks.recovery.capture(session,false,i) markPlanProgress(session,i)
+			status(string.format("Toxic-дно · %d/%d · не подтверждено %d",n,#list,failed),not ok)
+		end
+		return failed==0,failed==0 and "Ловушки обработаны" or ("Toxic: не подтверждено "..failed.."; продолжи строительство")
+	end
+	local function geometryKey(m)
+		return string.format("%.3f,%.3f,%.3f/%.3f,%.3f,%.3f",m.pos.X,m.pos.Y,m.pos.Z,m.size.X,m.size.Y,m.size.Z)
+	end
+	function S.fastPlan(targets,scene,options)
+		options=options or {} local byGeometry,placed={},{ } local obstacles=table.clone(scene) local index=Planner.spatial(obstacles) local targetIndex=Planner.spatial(targets)
+		for _,m in ipairs(scene) do if m.eligible then byGeometry[geometryKey(m)]=m end if m.instance and type(m.id)=="string" and m.id:match("^t:%d+$") then placed[m.id]=m end end
+		local plan={name="Stairwell · готовые модули",items={},operations=0,shapeSteps=0,helpers=0,alternatives={},templateVersion=19}
+		local blueprints={} local compiledCount=0 local cacheHits=0
+		for i,target in ipairs(targets) do
+			if options.cancelled and options.cancelled() then error("Подготовка остановлена",0) end
+			if i%128==0 and options.yield then options.yield() end
+			local recipe local same=placed[target.id] or byGeometry[geometryKey(target)]
+			if same and Planner.geometry(same,target) then recipe=Planner.recipe(target,target,same,"reuse") end
+			if not recipe or recipe.operations>0 then
+				for _,dir in ipairs(Planner.directions) do
+					local source=byGeometry[geometryKey({pos=target.pos-dir.unit*target.size[dir.axis],size=target.size})]
+					if source then local r=Planner.recipe(target,target,source,"clone",dir.face) if r and (not recipe or r.operations<recipe.operations) then recipe=r end end
+				end
+			end
+			if not recipe then
+				local initial,kind
+				if target.size==Vector3.new(4,4,4) then initial={pos=target.pos,size=target.size} kind="normal"
+				else initial={pos=target.pos-target.size/2+Vector3.new(.5,.5,.5),size=Vector3.new(1,1,1)} kind="detailed" end
+				recipe=Planner.recipe(initial,target,nil,kind)
+			end
+			if options.partials and options.partials[i] then recipe=Planner.chooseLive(target,{},obstacles,targets,false,options.partials[i]) end
+			if not recipe then error("Не найден рецепт модуля "..i,0) end
+			for _,other in ipairs(index:query(target)) do
+				if other.id~=target.id and (not recipe.source or other.id~=recipe.source.id) and other.reservedTarget~=target.id and Planner.intersects(target,other) then error("Существующий блок перекрыл Stairwell: "..i,0) end
+			end
+			-- Geometry growth is cached; live obstacle validation is still per target.
+			local key=geometryKey({pos=recipe.initial.pos-target.pos,size=target.size}).."/"..geometryKey({pos=Vector3.zero,size=recipe.initial.size}).."/"..recipe.kind
+			local cached=blueprints[key] local compiled
+			if cached then
+				local shift=target.pos-cached.origin compiled=table.clone(recipe) compiled.steps={}
+				for _,s in ipairs(cached.steps) do local step=table.clone(s) step.before={pos=s.before.pos+shift,size=s.before.size} step.after={pos=s.after.pos+shift,size=s.after.size} compiled.steps[#compiled.steps+1]=step end
+				if not Planner.safeBox(compiled.initial,target,index:query(compiled.initial),recipe.source and recipe.source.id,false) then compiled=nil end
+				if compiled then for _,step in ipairs(compiled.steps) do if not Planner.safeBox(step.after,target,index:query(step.after),recipe.source and recipe.source.id,false) then compiled=nil break end end end
+				cacheHits+=1
+			else compiled=Planner.compile(recipe,obstacles,targets,recipe.source and recipe.source.id,nil,index,targetIndex) compiledCount+=1
+				if compiled then blueprints[key]={origin=target.pos,steps=compiled.steps} end
+			end
+			if not compiled then error("Мир перекрыл готовый рецепт Stairwell: блок "..i,0) end
+			compiled.index=i plan.items[#plan.items+1]=compiled plan.operations+=compiled.operations plan.shapeSteps+=compiled.shapeSteps
+			if target.eligible==false then plan.operations+=1 end
+			obstacles[#obstacles+1]=target index:add(target) if target.eligible~=false then byGeometry[geometryKey(target)]=target end
+			if i%128==0 or i==#targets then
+				if options.progress then options.progress("Готовые модули: "..i.."/"..#targets,i/#targets) end
+				if options.visual then options.visual("template",plan,i) end
+			end
+		end
+		plan.templateCompiles=compiledCount plan.templateHits=cacheHits Planner.measurePlan(plan,options.position or targets[1].pos,options.timing)
+		return plan
+	end
+
+	function S.module(origin,direction,drop,level,turn,options)
+		options=options or S.options
+		local rows,routes,reserved={},{},{} local exits={}
+		local seed=options.seed or 1
+		local function noise(salt)
+			local n=(seed+level*104729+salt*69621)%2147483647
+			n=bit32.bxor(n,bit32.rshift(n,16)) n=(n*48271)%2147483647
+			return bit32.bxor(n,bit32.rshift(n,13))
+		end
+		local width=noise(1)%2==0 and 32 or 40 local depth=noise(2)%3==0 and 24 or 16
+		local right=Vector3.new(direction.Z,0,-direction.X)
 		local shade=math.clamp(math.round(255*(25-level)/24),0,255)
-		local function transform(lo,hi)
-			local r=box(lo,hi) local p=r.pos
-			r.pos=origin+right*p.X+Vector3.new(0,p.Y,0)+direction*p.Z
-			if direction.X~=0 then r.size=Vector3.new(r.size.Z,r.size.Y,r.size.X) end
+		local color=Color3.new(shade/255,shade/255,shade/255)
+		local function transform(lo,hi,start,heading)
+			start=start or origin heading=heading or direction
+			local r=box(lo,hi) local p=r.pos local side=Vector3.new(heading.Z,0,-heading.X)
+			r.pos=start+side*p.X+Vector3.new(0,p.Y,0)+heading*p.Z
+			if heading.X~=0 then r.size=Vector3.new(r.size.Z,r.size.Y,r.size.X) end
 			return r
 		end
-		local function part(lo,hi,neon)
-			local r=transform(lo,hi) local n=shade
-			r.color=Color3.new(n/255,n/255,n/255) r.material=neon and Enum.Material.Neon or Enum.Material.Brick r.level=level
+		local function part(lo,hi,neon,start,heading,hazard)
+			if hi.X<=lo.X or hi.Y<=lo.Y or hi.Z<=lo.Z then return end
+			local r=transform(lo,hi,start,heading) r.color=color r.material=neon and Enum.Material.Neon or Enum.Material.Brick r.level=level r.hazard=hazard==true
 			rows[#rows+1]=r
 		end
-		local function cubes(lo,hi)
-			for x=lo.X,hi.X-4,4 do for y=lo.Y,hi.Y-4,4 do for z=lo.Z,hi.Z-4,4 do part(Vector3.new(x,y,z),Vector3.new(x+4,y+4,z+4)) end end end
+		local function cubes(lo,hi,start,heading,hazard)
+			for x=lo.X,hi.X-4,4 do for y=lo.Y,hi.Y-4,4 do for z=lo.Z,hi.Z-4,4 do part(Vector3.new(x,y,z),Vector3.new(x+4,y+4,z+4),hazard,start,heading,hazard) end end end
 		end
-		local function passage(lo,hi) routes[#routes+1]=transform(lo,hi) end
-		-- Four rises share a base; repeated 4-wide strips are cheap to clone.
-		for z=0,rise-1 do
-			local base=math.floor(z/4)*4 local height=z%4+1
-			for x=-4,0,4 do part(Vector3.new(x,base,z),Vector3.new(x+4,base+height,z+1)) end
-			passage(Vector3.new(-4,z+1,z),Vector3.new(4,z+9,z+1))
+		local function passage(lo,hi,start,heading) routes[#routes+1]=transform(lo,hi,start,heading) end
+		local function exit(which)
+			if which=="right" then return origin+right*(width-8)+direction*(depth-8),right
+			elseif which=="left" then return origin-right*8+direction*(depth-8),right*-1
+			else return origin+direction*depth,direction end
 		end
-		for z=0,rise-4,4 do
-			cubes(Vector3.new(-8,z,z),Vector3.new(-4,z+16,z+4))
-			cubes(Vector3.new(4,z,z),Vector3.new(8,z+16,z+4))
-			cubes(Vector3.new(-4,z+16,z),Vector3.new(4,z+20,z+4))
-			if z%8==0 then part(Vector3.new(-1,z+14,z+1),Vector3.new(1,z+15,z+3),true) end
+		local style=noise(3)%3 -- down/up, up/down, or two upward beginnings.
+		local fake
+		if turn~="end" and not options.noBranch and (level==1 or noise(4)%4~=0) then
+			local choices={"right","left","straight"}
+			local start=noise(5)%3+1
+			for j=0,2 do local v=choices[(start+j-1)%3+1] if v~=turn then fake=v break end end
 		end
-		-- Landing: 32×16 outside; 24×8 usable. Entry and exit are real openings.
-		cubes(Vector3.new(-8,rise-4,rise),Vector3.new(24,rise,rise+16))
-		cubes(Vector3.new(-8,rise+12,rise),Vector3.new(24,rise+16,rise+16))
-		cubes(Vector3.new(-8,rise,rise),Vector3.new(-4,rise+12,rise+4))
-		cubes(Vector3.new(4,rise,rise),Vector3.new(24,rise+12,rise+4))
-		if turn~="straight" then cubes(Vector3.new(-8,rise,rise+12),Vector3.new(24,rise+12,rise+16))
+		exits[turn]=turn~="end" or nil if fake then exits[fake]=true end
+		-- No trim or rails: thick grids, low beams and differently sized chambers.
+		cubes(Vector3.new(-8,-4,0),Vector3.new(width-8,0,depth))
+		cubes(Vector3.new(-8,12,0),Vector3.new(width-8,16,depth))
+		cubes(Vector3.new(-8,0,0),Vector3.new(-4,12,4))
+		cubes(Vector3.new(4,0,0),Vector3.new(width-8,12,4))
+		if not exits.straight then cubes(Vector3.new(-8,0,depth-4),Vector3.new(width-8,12,depth))
 		else
-			cubes(Vector3.new(-8,rise,rise+12),Vector3.new(-4,rise+12,rise+16))
-			cubes(Vector3.new(4,rise,rise+12),Vector3.new(24,rise+12,rise+16))
+			cubes(Vector3.new(-8,0,depth-4),Vector3.new(-4,12,depth))
+			cubes(Vector3.new(4,0,depth-4),Vector3.new(width-8,12,depth))
 		end
-		if turn~="left" then cubes(Vector3.new(-8,rise,rise+4),Vector3.new(-4,rise+12,rise+12)) end
-		if turn~="right" then cubes(Vector3.new(20,rise,rise+4),Vector3.new(24,rise+12,rise+12)) end
-		for x=0,16,8 do part(Vector3.new(x-1,rise+10,rise+7),Vector3.new(x+1,rise+11,rise+9),true) end
-		passage(Vector3.new(-4,rise,rise),Vector3.new(4,rise+8,rise+4))
-		passage(Vector3.new(-4,rise,rise+4),Vector3.new(20,rise+8,rise+12))
-		local nextOrigin,nextDirection
-		if turn=="end" then
-			nextOrigin=origin+Vector3.new(0,rise,0) nextDirection=direction
-		elseif turn=="right" then
-			passage(Vector3.new(20,rise,rise+4),Vector3.new(24,rise+8,rise+12))
-			nextOrigin=origin+right*24+Vector3.new(0,rise,0)+direction*(rise+8) nextDirection=right
-		elseif turn=="left" then
-			passage(Vector3.new(-8,rise,rise+4),Vector3.new(-4,rise+8,rise+12))
-			nextOrigin=origin-right*8+Vector3.new(0,rise,0)+direction*(rise+8) nextDirection=right*-1
-		else
-			passage(Vector3.new(-4,rise,rise+12),Vector3.new(4,rise+8,rise+16))
-			nextOrigin=origin+Vector3.new(0,rise,0)+direction*(rise+16) nextDirection=direction
+		for z=4,depth-8,4 do
+			if not exits.left or z<depth-12 then cubes(Vector3.new(-8,0,z),Vector3.new(-4,12,z+4)) end
+			if not exits.right or z<depth-12 then cubes(Vector3.new(width-12,0,z),Vector3.new(width-8,12,z+4)) end
 		end
-		-- Space to approach the first tread. The previous landing normally covers it.
-		passage(Vector3.new(-4,0,-4),Vector3.new(4,8,0))
+		-- An awkward beam gives 8 studs of real clearance, not a decorative railing.
+		if noise(6)%2==0 then cubes(Vector3.new(-4,8,4),Vector3.new(width-12,12,8)) end
+		for x=0,width-16,8 do part(Vector3.new(x,10,depth-6),Vector3.new(x+1,11,depth-5),true) end
+		passage(Vector3.new(-4,0,-4),Vector3.new(4,8,4))
+		passage(Vector3.new(-4,0,4),Vector3.new(width-12,8,depth-4))
+		for which in pairs(exits) do
+			if which=="right" then passage(Vector3.new(width-12,0,depth-12),Vector3.new(width-8,8,depth-4))
+			elseif which=="left" then passage(Vector3.new(-8,0,depth-12),Vector3.new(-4,8,depth-4))
+			elseif which=="straight" then passage(Vector3.new(-4,0,depth-4),Vector3.new(4,8,depth)) end
+		end
+		local function flight(start,heading,length,up,broken,trapBottom)
+			for z=0,length-1 do
+				local base=up and math.floor(z/4)*4 or -4*(math.floor(z/4)+1)
+				local height=up and (z%4+1) or (4-z%4)
+				if not broken or z<length-2 then for x=-4,0,4 do part(Vector3.new(x,base,z),Vector3.new(x+4,base+height,z+1),false,start,heading) end end
+				if not broken then passage(Vector3.new(-4,base+height,z),Vector3.new(4,base+height+8,z+1),start,heading) end
+			end
+			for z=0,length-4,4 do
+				local base=up and z or -z
+				local bottom=trapBottom or base-4
+				cubes(Vector3.new(-8,bottom,z),Vector3.new(-4,base+12,z+4),start,heading)
+				cubes(Vector3.new(4,bottom,z),Vector3.new(8,base+12,z+4),start,heading)
+				cubes(Vector3.new(-4,base+12,z),Vector3.new(4,base+16,z+4),start,heading)
+				if z%8==0 then part(Vector3.new(-.0,base+10,z+1),Vector3.new(1,base+11,z+2),true,start,heading) end
+			end
+			local height=up and length or -length
+			return start+heading*length+Vector3.new(0,height,0),height
+		end
+		local nextOrigin,nextDirection=origin,direction
+		if turn~="end" then
+			local start,heading=exit(turn) nextDirection=heading
+			local hump=style~=0
+			if hump then
+				local raised=flight(start,heading,4,true)
+				cubes(Vector3.new(-4,-4,0),Vector3.new(4,0,8),raised,heading)
+				cubes(Vector3.new(-8,0,0),Vector3.new(-4,12,8),raised,heading)
+				cubes(Vector3.new(4,0,0),Vector3.new(8,12,8),raised,heading)
+				cubes(Vector3.new(-4,12,0),Vector3.new(4,16,8),raised,heading)
+				passage(Vector3.new(-4,0,0),Vector3.new(4,8,8),raised,heading)
+				start=raised+heading*8
+			end
+			nextOrigin=flight(start,heading,drop+(hump and 4 or 0),false)
+		end
+		local branch
+		if fake then
+			local start,heading=exit(fake) local up=style~=1 local height=up and 8 or -8 local bottom=math.min(0,height)-20
+			flight(start,heading,8,up,true,bottom)
+			-- Closed under the broken stairs as well: falling never exits the shell.
+			cubes(Vector3.new(-4,bottom-4,0),Vector3.new(4,bottom,20),start,heading,true)
+			cubes(Vector3.new(-4,bottom,0),Vector3.new(4,-4,4),start,heading)
+			cubes(Vector3.new(-8,bottom,8),Vector3.new(-4,height+12,24),start,heading)
+			cubes(Vector3.new(4,bottom,8),Vector3.new(8,height+12,24),start,heading)
+			cubes(Vector3.new(-4,bottom,20),Vector3.new(4,height+12,24),start,heading)
+			cubes(Vector3.new(-4,height+12,8),Vector3.new(4,height+16,24),start,heading)
+			cubes(Vector3.new(-4,bottom,8),Vector3.new(4,height-4,12),start,heading)
+			cubes(Vector3.new(-4,height+8,8),Vector3.new(4,height+12,12),start,heading)
+			reserved[#reserved+1]=transform(Vector3.new(-4,bottom,0),Vector3.new(4,height+8,20),start,heading)
+			branch={exit=fake,up=up,broken=true,bottom=bottom,start=start,direction=heading,height=height}
+		end
 		local solidBounds=bounds(rows)
-		return {rows=rows,routes=routes,origin=origin,nextOrigin=nextOrigin,nextDirection=nextDirection,turn=turn,level=level,bounds=solidBounds,clearBounds=StudioHooks.liveWorld.focus(solidBounds,bounds(routes))}
+		return {rows=rows,routes=routes,reserved=reserved,origin=origin,nextOrigin=nextOrigin,nextDirection=nextDirection,turn=turn,level=level,branch=branch,style=style,bounds=solidBounds,clearBounds=solidBounds}
 	end
+
 	local function clear(candidate,previous,obstacles)
 		local solids,passages,world={},{},{}
 		for _,old in ipairs(previous) do if Planner.intersects(candidate.clearBounds,old.clearBounds) then
-			for _,r in ipairs(old.rows) do solids[#solids+1]=r end for _,r in ipairs(old.routes) do passages[#passages+1]=r end
+			for _,r in ipairs(old.rows) do solids[#solids+1]=r end for _,r in ipairs(old.routes) do passages[#passages+1]=r end for _,r in ipairs(old.reserved or {}) do passages[#passages+1]=r end
 		end end
 		for _,part in ipairs(obstacles) do if part.Parent then local r=StudioHooks.guard.worldBox(part) r.instance=part world[#world+1]=r end end
 		local solidIndex,routeIndex,worldIndex=Planner.spatial(solids),Planner.spatial(passages),Planner.spatial(world)
@@ -5281,30 +5537,40 @@ StudioHooks.stairwell=(function()
 			for _,v in ipairs(worldIndex:query(r)) do if v.instance.Parent and StudioHooks.guard.intersects(v.instance,r) then return false end end
 			for _,v in ipairs(solidIndex:query(r)) do if Planner.intersects(r,v) then return false end end
 		end
+		for _,r in ipairs(candidate.reserved or {}) do
+			for _,v in ipairs(worldIndex:query(r)) do if v.instance.Parent and StudioHooks.guard.intersects(v.instance,r) then return false end end
+			for _,v in ipairs(solidIndex:query(r)) do if Planner.intersects(r,v) then return false end end
+		end
 		return true
 	end
 	function S.layout(origin,direction,options,query,cooperate)
 		local path={} local attempts=0 local exhausted=false
 		local function search(start,heading,level)
 			if level>options.floors then return true end
-			for _,turn in ipairs(level==options.floors and {"end"} or {"right","left","straight"}) do
-				attempts+=1 if attempts>256 then exhausted=true return false end
+			local turns=level==options.floors and {"end"} or {"right","left","straight"}
+			if #turns>1 then
+				local state=((options.seed or 1)+level*69621)%2147483647
+				for i=3,2,-1 do state=(state*48271)%2147483647 local j=state%i+1 turns[i],turns[j]=turns[j],turns[i] end
+			end
+			for variant=1,2 do for _,turn in ipairs(turns) do
+				attempts+=1 if attempts>1024 then exhausted=true return false end
 				if cooperate and cooperate(level,attempts)==false then return false end
-				local rise=level==1 and 12 or options.rise
-				local candidate=S.module(start,heading,rise,level,turn)
+				local config=table.clone(options) config.noBranch=variant==2
+				local rise=math.clamp(options.rise+(((options.seed or 1)+level*31)%3-1)*4,12,24)
+				local candidate=S.module(start,heading,rise,level,turn,config)
 				local focus=StudioHooks.liveWorld.focus(candidate.bounds,bounds(candidate.routes))
 				if clear(candidate,path,query(focus)) then
 					path[#path+1]=candidate
 					if search(candidate.nextOrigin,candidate.nextDirection,level+1) then return true end
 					path[#path]=nil
 				end
-			end
+			end end
 			return false
 		end
 		if not search(origin,direction,1) then return nil,exhausted and "Лимит поиска: свободный маршрут не найден" or "Нет свободного маршрута: измени место или число этажей" end
 		return path,attempts
 	end
-	function S.cancel() S.job+=1 S.busy=false status("Расчёт отменён") end
+	function S.cancel() S.job+=1 S.busy=false if S.preparing then _G.stopautobuild=true end status("Расчёт отменён") end
 	function S.generate(options)
 		if unloaded or _G.autobuildRunning or busySaving or StudioHooks.extras and (StudioHooks.extras.busy or StudioHooks.extras.running) then status("Сначала останови текущую работу",true) return false end
 		local config,err=S.configure(options or S.options) if not config then status(err,true) return false end
@@ -5320,7 +5586,9 @@ StudioHooks.stairwell=(function()
 			params.FilterDescendantsInstances=ignore
 			local hit=workspace:Raycast(pos+Vector3.new(0,2,0),Vector3.new(0,-80,0),params) if hit then ground=hit.Position.Y end
 		end)
-		local origin=Vector3.new(math.round(pos.X/4)*4,math.ceil(ground/4)*4,math.round(pos.Z/4)*4)+heading*12
+		-- Keep the deepest closed pit above the game's ground, not inside its floor.
+		local height=(config.floors-1)*math.min(24,config.rise+4)+32
+		local origin=Vector3.new(math.round(pos.X/4)*4,math.ceil(ground/4)*4+height,math.round(pos.Z/4)*4)+heading*12
 		task.spawn(function()
 			local ok,result=pcall(function()
 				local root=workspace:FindFirstChild("Bricks")
@@ -5351,24 +5619,32 @@ StudioHooks.stairwell=(function()
 				local guidOk,guid=pcall(function() return HttpService:GenerateGUID(false) end)
 				local id="stairwell_"..(guidOk and guid or tostring(os.time()).."_"..tostring(math.random(1,100000000)))
 				S.last={id=id,code=table.concat(encoded),path=path,count=count}
+				S.remember(id,S.last.code,path)
 				StudioHooks.stageStairwell(S.last.code,id,"Stairwell · "..config.floors)
-				status(string.format("Готово · %d этажей · %d блоков. Проверь preview, затем строй.",config.floors,count))
+				S.busy=false status(string.format("Preview · %d уровней · %d блоков · готовлю шаблонный план",config.floors,count))
+				if StudioHooks.prepareStairwell then S.preparing=true if StudioHooks.prepareStairwell()==false then S.preparing=false status("Preview готов · нажми Построить для подготовки плана") end end
 			end)
 			if job==S.job then S.busy=false if not ok and not unloaded then status(tostring(result),true) end end
 		end)
 		return true
 	end
 	function S.build()
-		if S.busy then status("Дождись расчёта",true) return false end
+		if S.busy or S.preparing or _G.autobuildRunning then status("Дождись расчёта",true) return false end
 		local tab=tabsData[activeTabIndex]
 		if not tab or type(tab.id)~="string" or tab.id:sub(1,10)~="stairwell_" then status("Открой созданную вкладку Stairwell",true) return false end
 		StudioHooks.resumeRecovery() return true
 	end
-	function S.close() S.job+=1 S.busy=false end
+	function S.close() S.job+=1 S.busy=false S.preparing=false S.returnCharacter() end
+	function S.onPrepared(session,success,message)
+		S.preparing=false if session and S.last and session.buildId==S.last.id then
+			status(success and ("План готов · "..S.last.count.." блоков · можно строить") or tostring(message),not success)
+		end
+	end
 	return S
 end)()
 
 StudioHooks.resumeRecovery=function() launchAction(false) end
+StudioHooks.prepareStairwell=function() if busySaving or isBuilding or unloaded then return false end launchAction("stairwellPreview") return true end
 btnStart.MouseButton1Click:Connect(function() launchAction(false) end)
 
 
@@ -5975,22 +6251,22 @@ local stairGroup=create("Frame",{Name="GeneratorGroup",Parent=UI.extrasPage,Posi
 label(stairGroup,"Генераторы",UDim2.fromOffset(18,12),UDim2.new(1,-36,0,26),17,"accent","strong")
 label(stairGroup,"ПЛОЩАДКИ И ЛЕСТНИЦЫ",UDim2.fromOffset(18,46),UDim2.new(1,-36,0,20),10,"muted","medium")
 local stairOpen=button(stairGroup,"Stairwell   ↗",UDim2.fromOffset(18,78),UDim2.new(1,-36,0,38),"deep") stairOpen.Name="OpenStairwell"
-label(stairGroup,"По образцу 9mzee · свободный маршрут между этажами",UDim2.fromOffset(18,120),UDim2.new(1,-36,0,24),11,"muted")
+label(stairGroup,"9mzee · кривые спуски · развилки и закрытые провалы",UDim2.fromOffset(18,120),UDim2.new(1,-36,0,24),11,"muted")
 local stairWindow=create("Frame",{Name="StairwellWindow",Parent=gui,Position=UDim2.new(.5,-180,.5,-205),Size=UDim2.fromOffset(360,410),BackgroundColor3=palette.base,Visible=false,Active=true,ZIndex=84}) skin(stairWindow,"base") corners(stairWindow,11) stroke(stairWindow)
 local stairHeader=create("Frame",{Parent=stairWindow,Size=UDim2.new(1,0,0,44),BackgroundTransparency=1,Active=true})
 label(stairHeader,"Stairwell / Генератор",UDim2.fromOffset(16,10),UDim2.new(1,-60,0,26),13,"text","strong")
 local stairClose=button(stairHeader,"×",UDim2.new(1,-38,0,8),UDim2.fromOffset(28,28),"deep") stairClose.Name="CloseStairwell"
-local stairStatus=label(stairWindow,"Лестница 8 стад шириной → площадка → следующий этаж.",UDim2.fromOffset(16,54),UDim2.new(1,-32,0,50),12,"accent") stairStatus.Name="StairwellStatus"
+local stairStatus=label(stairWindow,"Грубые площадки, ложные лестницы и спуск в темноту.",UDim2.fromOffset(16,54),UDim2.new(1,-32,0,50),12,"accent") stairStatus.Name="StairwellStatus"
 local stairFields={}
-for i,item in ipairs({{"floors","Этажей · 1–64","3"},{"rise","Подъём · стады","16"}}) do
-	label(stairWindow,item[2],UDim2.fromOffset(16+(i-1)*168,112),UDim2.fromOffset(160,22),10,"muted")
-	local f=field(stairWindow,item[3],UDim2.fromOffset(16+(i-1)*168,140),UDim2.fromOffset(160,32)) f.Name="Stairwell_"..item[1] stairFields[item[1]]=f
+for i,item in ipairs({{"floors","Уровней · 1–64","6"},{"rise","Перепад","16"},{"seed","Вариант / seed","1"}}) do
+	label(stairWindow,item[2],UDim2.fromOffset(16+(i-1)*112,112),UDim2.fromOffset(104,22),10,"muted")
+	local f=field(stairWindow,item[3],UDim2.fromOffset(16+(i-1)*112,140),UDim2.fromOffset(104,32)) f.Name="Stairwell_"..item[1] stairFields[item[1]]=f
 end
-label(stairWindow,"1-й этаж белый → 25-й чёрный → дальше чёрные.\nПервый подъём: 12. Далее: 12–24, кратно 4.\nПроход высотой 8. Постройки обходятся без расчистки.\nЗатемнение меняет HEX стен и Neon, не яркость лампы.",UDim2.fromOffset(16,184),UDim2.new(1,-32,0,74),10,"muted")
+label(stairWindow,"Основной маршрут вниз; иногда сначала короткий подъём.\nОпасные развилки: сломанные ступени → закрытая яма с toxic.\n1-й белый → 25-й чёрный → дальше чёрные.\nВход поднимается, чтобы ямы не попали в землю.",UDim2.fromOffset(16,184),UDim2.new(1,-32,0,74),10,"muted")
 local stairPreview=button(stairWindow,"Создать preview",UDim2.fromOffset(16,270),UDim2.new(1,-32,0,36),"primary") stairPreview.Name="GenerateStairwell"
 local stairBuild=button(stairWindow,"Построить",UDim2.fromOffset(16,316),UDim2.fromOffset(160,32),"soft") stairBuild.Name="BuildStairwell"
 local stairCancel=button(stairWindow,"Отменить расчёт",UDim2.fromOffset(184,316),UDim2.fromOffset(160,32),"deep") stairCancel.Name="CancelStairwell"
-label(stairWindow,"План считается перед строительством. Этажи идут снизу вверх.",UDim2.fromOffset(16,366),UDim2.new(1,-32,0,30),10,"muted")
+label(stairWindow,"План готовится вместе с preview. Вариант / seed меняет развилки.",UDim2.fromOffset(16,366),UDim2.new(1,-32,0,30),10,"muted")
 for _,o in ipairs(stairWindow:GetDescendants()) do if o:IsA("GuiObject") then o.ZIndex=86 end end
 local stairOpened=false
 local function stairVisible() stairWindow.Visible=stairOpened and mainFrame.Visible end
@@ -7100,4 +7376,4 @@ unloadScript = function()
 end
 
 _G.AUTOBUILD_UNLOAD = unloadScript
-setStatus("ORBIT stairwell-18: генератор площадок и новый пул форм")
+setStatus("ORBIT stairwell-19: кривые спуски, закрытые ловушки и готовые модули")
