@@ -44,6 +44,7 @@ local updatingEditor = false
 local rotationPivot = nil
 local editorDisplayText = nil
 local saveRevision = 0
+local parseBlocks -- shared with early document/recovery closures
 -- Full documents never depend on the visible TextBox page.
 StudioHooks.documents=(function()
 	local D={limit=12000,lines=160,cache={},written={},files={},serial=0,visualRevision=0}
@@ -1001,7 +1002,7 @@ local function serializeBlock(b)
 	local extra=#sprays>0 and "."..table.concat(sprays,"..") or ""
 	return string.format("|%s%s%s%.0f,%.0f,%.0f.%.6f,%.6f,%.6f%s.|",colorHex(b.color), MaterialSymbols[b.material],b.canCollide and "" or "^",b.size.X,b.size.Y,b.size.Z,b.centerPos.X,b.centerPos.Y,b.centerPos.Z,extra)
 end
-local function parseBlocks(text, offset)
+parseBlocks=function(text, offset)
 	offset=offset or Vector3.zero
 	local blocks,invalid={},0
 	if type(text)~="string" then return blocks,1 end
