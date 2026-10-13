@@ -515,7 +515,7 @@ local function updateDefaultStats()
 end
 
 btnLog.MouseButton1Click:Connect(function()
-	local text="Autobuild Studio v5 / ORBIT · speed-7\n"..table.concat(diagnosticLog,"\n")
+	local text="Autobuild Studio v5 / ORBIT · control-8\n"..table.concat(diagnosticLog,"\n")
 	if storageError then text=text.."\nStorage: "..storageError end
 	if copyText(text) then setStatus("Диагностика скопирована") else setStatus("Буфер обмена недоступен",true) end
 end)
@@ -1565,6 +1565,11 @@ end
 
 function P.prepare(targets,world,options)
 	options=options or {}
+	local sliceAt=os.clock()
+	local function slice()
+		if options.cancelled and options.cancelled() then error("Подготовка остановлена",0) end
+		if options.yield and os.clock()-sliceAt>=.02 then options.yield() sliceAt=os.clock() end
+	end
 	local function checkpoint(text,fraction)
 		if options.cancelled and options.cancelled() then error("Подготовка остановлена",0) end
 		if options.progress then options.progress(text,fraction) end
@@ -1575,6 +1580,7 @@ function P.prepare(targets,world,options)
 	local targetIndex=Spatial.new(targets)
 	local recipes,lowerCosts={},{ }
 	for i,target in ipairs(targets) do
+		slice()
 		local usedFaces={} for _,sp in ipairs(target.sprays) do if usedFaces[sp.face] then error("Блок "..i..": несколько надписей на одной грани",0) end usedFaces[sp.face]=true end
 		local baseline=P.baselines(target)
 		if #baseline==0 then error("Блок "..i..": границы не совместимы с целыми шагами граней",0) end
@@ -1590,6 +1596,7 @@ function P.prepare(targets,world,options)
 			end
 		end
 		for _,source in ipairs(nearestModels(target,models,64)) do
+			slice()
 			if source.external and source.eligible~=false and geometry(source,target) then
 				local reuse=makeRecipe({pos=source.pos,size=source.size},target,source,"reuse")
 				if reuse then list[#list+1]=reuse end
@@ -1609,6 +1616,7 @@ function P.prepare(targets,world,options)
 	end
 	local futureSavings={} local outgoing={}
 	for j,list in ipairs(recipes) do
+		slice()
 		for _,r in ipairs(list) do
 			if r.source then
 				local id=r.source.id
@@ -1641,6 +1649,7 @@ function P.prepare(targets,world,options)
 		local layerCursor=1
 		local patchCenter
 		for step=1,#targets do
+			slice()
 			while layerOrder[layerCursor] and done[layerOrder[layerCursor].index] do layerCursor+=1 end
 			local layerBottom=layerOrder[layerCursor] and layerOrder[layerCursor].bottom or math.huge
 			local patchBottom=math.huge
@@ -1662,6 +1671,7 @@ function P.prepare(targets,world,options)
 			local best,bestIndex,bestScore=nil,nil,math.huge
 			local evaluations={}
 			for i,target in ipairs(targets) do
+				if i%64==0 then slice() end
 				if not done[i] and (not layers or target.pos.Y-target.size.Y/2<=layerBottom+.025) and (not patches or (target.pos.X-patchCenter.X)^2+(target.pos.Z-patchCenter.Z)^2<=24^2 and target.pos.Y-target.size.Y/2<=patchBottom+.025) then
 					local r=ready[i]
 					if r and r.source and not available[r.source.id] then refresh(i) r=ready[i] end
@@ -1684,6 +1694,7 @@ function P.prepare(targets,world,options)
 			for _,choice in ipairs(evaluations) do
 				if best and choice.score>bestScore then break end
 				for _,candidate in ipairs(recipes[choice.index]) do
+					slice()
 					if not candidate.source or available[candidate.source.id] then
 						local compiled=P.compile(candidate,obstacles,targets,(candidate.kind=="reuse" or candidate.kind=="edit") and candidate.source.id or nil,function() checkpoint(name..": проверка промежуточных объёмов",.45+.55*(planNumber-1+step/#targets)/5) end,obstacleIndex,targetIndex)
 						if compiled then
@@ -1772,6 +1783,7 @@ function P.prepareOrdered(targets,scene,options,order)
 	local plan={name="Пользовательский маршрут",items={},operations=0,shapeSteps=0,helpers=0,score=0,alternatives={}}
 	local seen={}
 	for rank,index in ipairs(order) do
+		if options.yield then options.yield() end
 		if options.cancelled and options.cancelled() then error("Подготовка остановлена",0) end
 		local target=targets[index]
 		if not target or seen[index] then error("Неверный порядок шаблона",0) end
@@ -1797,7 +1809,7 @@ local positionLock, positionPhysics, noclipConnection, toolEquipConnection
 local isBuilding = false
 local collisionState, toolState = {}, {}
 local equippedCharacter=nil
-local function cancelled() return unloaded or _G.stopautobuild == true end
+local function cancelled() return unloaded or _G.stopautobuild==true or StudioHooks.control and StudioHooks.control.interrupted() or false end
 local function roundTripPing() return getSafePing()*2 end
 StudioHooks.timing=(function()
 	local T={multiplier=2,frame=1/60,slowFrame=1/60,samples=0,acks={}}
@@ -2034,7 +2046,7 @@ local function markPlanProgress(session,index)
 		create("SelectionBox",{Name="StateOutline",Parent=part,Adornee=part,LineThickness=.02,SurfaceTransparency=1})
 	end
 	local partial=session.blocks[index].placedBrick
-	local color=session.done[index] and Color3.fromRGB(107,231,150) or (partial and partial.Parent and Color3.fromRGB(255,196,95) or Color3.fromRGB(162,136,234))
+	local color=session.blocks[index].skipped and Color3.fromRGB(130,135,145) or session.blocks[index].failure and Color3.fromRGB(245,110,100) or session.done[index] and Color3.fromRGB(107,231,150) or (partial and partial.Parent and Color3.fromRGB(255,196,95) or Color3.fromRGB(162,136,234))
 	part.StateOutline.Color3=color
 end
 local function refreshPlanProgress(session)
@@ -2891,7 +2903,7 @@ local function reconcileBuild(session)
 			if holder.creation or holder.brick and holder.brick.Parent then cleanup=true end
 			if holder.brick and not holder.brick.Parent then session.helpers[holder.brick]=nil end
 		end
-		if data.placedBrick and matchesAll(data.placedBrick,data) and not data.pendingResize and not data.pendingCollision and not data.creation and not cleanup then
+		if not data.skipped and not data.repairRequested and data.placedBrick and matchesAll(data.placedBrick,data) and not data.pendingResize and not data.pendingCollision and not data.creation and not cleanup then
 			session.done[i]=true
 			session.ids[data.placedBrick]="t:"..i session.instances["t:"..i]=data.placedBrick
 		else session.done[i]=nil end
@@ -2996,7 +3008,9 @@ local createOnce=(function()
 		_G.AUTOBUILD_RESUME={version=2,job=game.JobId,session=session}
 		if not writefile then return end
 		local records={}
+		local controls={}
 		for index,data in ipairs(session.blocks) do
+			if data.skipped or data.repairRequested or data.failure or data.repairDeleteRequested then controls[#controls+1]={index=index,skipped=data.skipped==true,repair=data.repairRequested==true,deleteRequested=data.repairDeleteRequested==true,failure=data.failure} end
 			if data.work and not session.done[index] then
 				local recipe=data.work.recipe
 				local record={index=index,holder=packedHolder(data),recipe={kind=recipe.kind,initial=packedBox(recipe.initial),face=FaceSymbols[recipe.face],source=packedSource(recipe.source),helpers={}},helpers={}}
@@ -3010,7 +3024,7 @@ local createOnce=(function()
 			if not lastManifest or lastManifest.id~=session.buildId or lastManifest.text~=session.text or lastManifest.offset~=session.offset then
 				writefile(manifestFile,HttpService:JSONEncode({version=1,job=game.JobId,buildId=session.buildId,text=session.text,offset=planVector(session.offset)})) lastManifest={id=session.buildId,text=session.text,offset=session.offset}
 			end
-			writefile(stateFile,HttpService:JSONEncode({version=1,job=game.JobId,buildId=session.buildId,records=records}))
+			writefile(stateFile,HttpService:JSONEncode({version=1,job=game.JobId,buildId=session.buildId,records=records,controls=controls}))
 		end)
 		if not ok then setStatus("Состояние в памяти; контрольная запись не удалась: "..tostring(err),true) end
 	end
@@ -3020,6 +3034,10 @@ local createOnce=(function()
 			if not isfile(manifestFile) or not isfile(stateFile) then return end
 			local manifest=HttpService:JSONDecode(readfile(manifestFile)) local stored=HttpService:JSONDecode(readfile(stateFile))
 			if type(manifest)~="table" or type(stored)~="table" or manifest.version~=1 or stored.version~=1 or manifest.job~=game.JobId or stored.job~=game.JobId or manifest.buildId~=session.buildId or stored.buildId~=session.buildId or manifest.text~=session.text or readPlanVector(manifest.offset)~=session.offset or type(stored.records)~="table" then return end
+			for _,c in ipairs(stored.controls or {}) do
+				local data=type(c)=="table" and session.blocks[c.index]
+				if data then data.skipped=c.skipped==true or nil data.repairRequested=c.repair==true or nil data.repairDeleteRequested=c.deleteRequested==true or nil data.failure=type(c.failure)=="string" and c.failure or nil end
+			end
 			local folder=getPlayerBricksFolder() if not folder then return end
 			local function holder(saved,final)
 				if type(saved)~="table" then return nil end
@@ -3120,6 +3138,27 @@ local createOnce=(function()
 		local c=holder.creation c.connection:Disconnect() active[c]=nil holder.creation=nil holder.brick=part holder.createBlocked=nil
 		if c.sentAt and c.attempts==1 then StudioHooks.timing.observed("create",os.clock()-c.sentAt) end
 		C.capture(session) return part
+	end
+	function C.inspect(holder,session)
+		local folder=getPlayerBricksFolder() if not folder then return false,"Нет вашей папки блоков" end
+		local c=holder.creation
+		if c then
+			local part,reason=resolve(c,folder,holder,session)
+			if not part then return false,reason=="ambiguous" and "Несколько кандидатов на неподтверждённый блок" or "Переделка ждёт прежний запрос создания; его нельзя забыть безопасно" end
+			accept(holder,part,session)
+		end
+		for n=#(holder.retired or {}),1,-1 do
+			local old=holder.retired[n] local part=resolve(old,folder,holder,session)
+			if not part or holder.brick and holder.brick~=part then return false,"Переделка ждёт поздний запрос; блок можно пропустить" end
+			holder.creation=old accept(holder,part,session) table.remove(holder.retired,n)
+		end
+		if holder.brick and holder.temporary then session.helpers[holder.brick]=true end
+		if holder.brick and not holder.temporary then
+			holder.placedBrick=holder.brick
+			local index=session.activeIndex
+			if index then session.ids[holder.brick]=session.models[index].id session.instances[session.models[index].id]=holder.brick end
+		end
+		return true
 	end
 	function C.create(holder,source,face,initial,mode,session,label)
 		if holder.brick and holder.brick.Parent then return holder.brick end
@@ -3356,6 +3395,10 @@ local function executeBlock(data,index,session)
 				if not replacement then return false,"Источник потерян; безопасного обхода пока нет" end
 				data.work={recipe=replacement,helpers={}}
 				if replacement.kind=="reuse" then data.placedBrick=replacement.source.instance end
+				data.replans=(data.replans or 0)+1
+				if data.replans>2 then return false,"Источник меняется повторно; блок отложен" end
+				task.wait()
+				if cancelled() then return false,"Пауза" end
 				return executeBlock(data,index,session)
 			end
 		end
@@ -3395,6 +3438,92 @@ local function executeBlock(data,index,session)
 	if not matchesAll(brick,data) then return false,"Целевой блок изменился после удаления временных деталей" end
 	return true
 end
+-- Interrupt a single target without forgetting a command already in flight.
+StudioHooks.control=(function()
+	local C={}
+	function C.interrupted()
+		local s=resumeSession local d=s and s.activeIndex and s.blocks[s.activeIndex]
+		return d and (d.skipped or d.repairInterrupt)==true
+	end
+	local function selected()
+		local s=resumeSession if not s then return nil end
+		local i=s.activeIndex or s.lastFailedIndex
+		if not i then for n,d in ipairs(s.blocks) do if d.skipped or d.failure then i=n break end end end
+		return s,i,i and s.blocks[i]
+	end
+	function C.skip()
+		local s,i,d=selected()
+		if not d or s.done[i] then setStatus("Нет текущего или проблемного блока",true) return false end
+		d.skipped=true d.repairRequested=nil d.repairInterrupt=nil
+		StudioHooks.recovery.capture(s) markPlanProgress(s,i)
+		setStatus("Пропущен блок №"..i..". Его отправленные запросы остаются под наблюдением.")
+		return true
+	end
+	function C.repair()
+		local s,i,d=selected()
+		if not d or s.done[i] then setStatus("Нет проблемного блока для переделки",true) return false end
+		d.skipped=nil d.repairRequested=true d.repairInterrupt=s.activeIndex==i or nil
+		s.lastFailedIndex=i StudioHooks.recovery.capture(s) markPlanProgress(s,i)
+		setStatus("Переделка блока №"..i.." поставлена в очередь")
+		if not isBuilding and StudioHooks.resumeRecovery then StudioHooks.resumeRecovery() end
+		return true
+	end
+	local function rebuild(data,index,session)
+		-- Resolve late creations first. Never clear an unknown Build request.
+		local ok,err=StudioHooks.recovery.inspect(data,session)
+		if not ok then return false,err end
+		for _,h in ipairs(data.work and data.work.helpers or {}) do
+			ok,err=StudioHooks.recovery.inspect(h,session) if not ok then return false,err end
+		end
+		local brick=data.placedBrick or data.brick
+		if brick and brick.Parent then
+			local own=getPlayerBricksFolder()
+			if not own or not brick:IsDescendantOf(own) or session.instances[session.models[index].id]~=brick then return false,"Переделка отклонена: блок не закреплён за этой деталью" end
+			if not data.repairDeleteRequested then
+				if not ensureNear(brick.Position) then return false,"Не удалось подойти для переделки" end
+				local tool=awaitTool("Delete") local hrp=getValidHRP()
+				if not tool or not hrp or cancelled() then return false,"Для переделки нужны Delete и персонаж" end
+				data.repairDeleteRequested=true StudioHooks.recovery.capture(session)
+				local sent,message=pcall(function() tool.event:FireServer(brick,hrp.Position) end)
+				if not sent then data.repairDeleteRequested=nil return false,tostring(message) end
+				session.actual.deletes+=1
+			end
+			if not waitUntil(function() return not brick.Parent end,responseTimeout(5)) then return false,"Ожидаю удаление проблемного блока; повтор удаления не отправлен" end
+		end
+		for n=#(data.work and data.work.helpers or {}),1,-1 do
+			ok,err=deleteHelper(data.work.helpers[n],session) if not ok then return false,err end
+		end
+		-- Old resize/paint replies reference the deleted Instance only.
+		if brick then session.ids[brick]=nil end
+		session.instances[session.models[index].id]=nil
+		data.placedBrick=nil data.brick=nil data.work=nil data.pendingResize=nil data.pendingCollision=nil
+		data.repairRequested=nil data.repairDeleteRequested=nil data.createBlocked=nil
+		StudioHooks.recovery.completed(data) StudioHooks.recovery.capture(session)
+		return true
+	end
+	function C.execute(data,index,session)
+		session.activeIndex=index data.repairInterrupt=nil data.replans=0
+		local function attempt()
+			if data.repairRequested then local ok,err=rebuild(data,index,session) if not ok then return false,err end end
+			return executeBlock(data,index,session)
+		end
+		local ran,ok,err=pcall(attempt)
+		if not ran then err=tostring(ok) ok=false end
+		if data.repairInterrupt and not data.skipped and not unloaded and not _G.stopautobuild then
+			data.repairInterrupt=nil
+			ran,ok,err=pcall(attempt) if not ran then err=tostring(ok) ok=false end
+		end
+		session.activeIndex=nil data.repairInterrupt=nil
+		if data.skipped then ok=false err="Пропущено пользователем" end
+		if not ok then data.failure=tostring(err or "Неизвестная ошибка") session.lastFailedIndex=index
+		else data.failure=nil if session.lastFailedIndex==index then session.lastFailedIndex=nil end end
+		if not ok then StudioHooks.recovery.capture(session) end
+		markPlanProgress(session,index)
+		return ok,err
+	end
+	return C
+end)()
+
 local function runBuilderEngine(buildString,offset,prepareOnly)
 	if not resumeSession or resumeSession.buildId~=PlanLibrary.id() or resumeSession.text~=buildString or resumeSession.offset~=offset then
 		if resumeSession then
@@ -3412,6 +3541,7 @@ local function runBuilderEngine(buildString,offset,prepareOnly)
 		StudioHooks.recovery.restore(resumeSession)
 	end
 	local session=resumeSession
+	session.activeIndex=nil
 	if session.plan and session.plan.plannerVersion~=Planner.version then session.plan=nil session.planByIndex=nil session.previewInvalid=true end
 	session.actionRevision=(session.actionRevision or 0)+1
 	reconcileBuild(session)
@@ -3428,7 +3558,7 @@ local function runBuilderEngine(buildString,offset,prepareOnly)
 		local partials,activeSources=StudioHooks.recovery.preparation(session)
 		local cached=loadPreparedPlan(session,scene,findTool("Delete")~=nil)
 		if cached then cached.plannerVersion=Planner.version end
-		session.plan=cached or PlanLibrary.prepare(session.models,scene,{partials=partials,activeSources=activeSources,timing=StudioHooks.timing.profile(),bridges=findTool("Delete")~=nil,position=root and root.Position or session.models[1].pos,cancelled=cancelled,visual=function(phase,payload,count) PlanDrawing.progress(session,phase,payload,count) end,progress=function(text,fraction)
+		session.plan=cached or PlanLibrary.prepare(session.models,scene,{partials=partials,activeSources=activeSources,timing=StudioHooks.timing.profile(),bridges=findTool("Delete")~=nil,position=root and root.Position or session.models[1].pos,cancelled=cancelled,yield=function() task.wait() end,visual=function(phase,payload,count) PlanDrawing.progress(session,phase,payload,count) end,progress=function(text,fraction)
 			setStatus(string.format("Подготовка %d%% · %s",math.round(fraction*100),text))
 			statDisplay.Text="Подготовка · "..#session.blocks.." блоков"
 			task.wait()
@@ -3455,35 +3585,37 @@ local function runBuilderEngine(buildString,offset,prepareOnly)
 	task.wait()
 	enableNoclip() startToolForcing()
 	local deferred={}
+	local function finish(i,data)
+		session.done[i]=true _G.autobuildPlaced+=1 data.failure=nil
+		StudioHooks.recovery.completed(data) StudioHooks.recovery.capture(session) markPlanProgress(session,i)
+		if visualFolder then local visual=visualFolder:FindFirstChild("Visual_"..i) if visual then visual:Destroy() end end
+	end
 	for rank,item in ipairs(session.plan.items) do
 		advancePlanPreview(session,rank)
 		local i=item.index local data=session.blocks[i]
-		if cancelled() then return false,"Пауза. План и временные детали сохранены для продолжения." end
-		if not session.done[i] then
-			local ok,err=executeBlock(data,i,session)
-			if not ok then
-				local recoverable=data.creation~=nil or data.createBlocked==true
-				for _,h in ipairs(data.work and data.work.helpers or {}) do if h.creation or h.createBlocked then recoverable=true end end
-				if not recoverable or cancelled() then return false,err end
-				deferred[#deferred+1]=i setStatus("Откладываю блок "..i..": "..err,true)
-				continue
-			end
-			session.done[i]=true _G.autobuildPlaced=_G.autobuildPlaced+1
-			StudioHooks.recovery.completed(data)
-			StudioHooks.recovery.capture(session)
-			markPlanProgress(session,i)
-			if visualFolder then local visual=visualFolder:FindFirstChild("Visual_"..i) if visual then visual:Destroy() end end
+		if cancelled() then return false,"Пауза. План и незавершённые запросы сохранены." end
+		if not session.done[i] and not data.skipped then
+			local ok,err=StudioHooks.control.execute(data,i,session)
+			if cancelled() then return false,"Пауза. Незавершённый блок сохранён." end
+			if ok then finish(i,data)
+			elseif not data.skipped then deferred[#deferred+1]=i setStatus("Откладываю блок №"..i..": "..tostring(err),true) end
 		end
+		if rank%8==0 then task.wait() end
 	end
+	-- One bounded reconciliation pass; an error on one target cannot loop forever.
 	for _,i in ipairs(deferred) do
 		if cancelled() then return false,"Пауза; незавершённые блоки сохранены" end
 		local data=session.blocks[i]
-		local ok,err=executeBlock(data,i,session)
-		if ok then session.done[i]=true _G.autobuildPlaced+=1 StudioHooks.recovery.completed(data) StudioHooks.recovery.capture(session) markPlanProgress(session,i)
-		else setStatus("Блок "..i.." остаётся в восстановлении: "..err,true) end
+		if not data.skipped and not session.done[i] then
+			local ok,err=StudioHooks.control.execute(data,i,session)
+			if cancelled() then return false,"Пауза; незавершённые блоки сохранены" end
+			if ok then finish(i,data) elseif not data.skipped then setStatus("Блок №"..i..": "..tostring(err),true) end
+		end
 	end
-	if #deferred>0 and _G.autobuildPlaced<#session.blocks then
-		return false,string.format("Готово %d/%d. Остальные блоки сохранены для восстановления; «Продолжить» сверит мир и повторит только отсутствующие этапы.",_G.autobuildPlaced,#session.blocks)
+	local skipped=0
+	for _,data in ipairs(session.blocks) do if data.skipped then skipped+=1 end end
+	if _G.autobuildPlaced<#session.blocks then
+		return false,string.format("Готово %d/%d · пропущено %d. Можно продолжить или переделать проблемный блок.",_G.autobuildPlaced,#session.blocks,skipped)
 	end
 	return true,string.format("Готово: %d блоков · созданий %d · изменений граней %d · удалений временных %d",#session.blocks,session.actual.creates,session.actual.shapes,session.actual.deletes)
 end
@@ -3503,6 +3635,7 @@ local function launchAction(forcePreparation)
 	if handles then handles:Destroy() handles=nil end
 	task.spawn(function()
 		local ok,finished,message=pcall(runBuilderEngine,text,offset,prepareOnly)
+		if resumeSession then resumeSession.activeIndex=nil end
 		unlockPosition() stopToolForcing() disableNoclip() isBuilding=false
 		if unloaded then return end
 		_G.autobuildRunning=false textBox.TextEditable=true btnStart.TextColor3=C_WHITE
@@ -3512,6 +3645,7 @@ local function launchAction(forcePreparation)
 		statDisplay.Text=prepareOnly and ok and finished and ("План · действий ~"..resumeSession.plan.operations) or string.format("Готово: %d/%d",_G.autobuildPlaced or 0,#blocks)
 	end)
 end
+StudioHooks.resumeRecovery=function() launchAction(false) end
 btnStart.MouseButton1Click:Connect(function() launchAction(false) end)
 
 
@@ -3885,16 +4019,19 @@ UI.planBtn=button(bottom,"План: Авто",UDim2.new(1,-286,0,0),UDim2.fromOf
 UI.moreBtn=button(editorFrame,"···",UDim2.new(1,-46,0,6),UDim2.fromOffset(32,28),"deep")
 recordBadge.Position=UDim2.new(1,-174,0,10)
 UI.primary={btnStart,btnPaste,btnCopy,btnImport,btnToMe}
-local loadInspector=create("Frame",{Parent=sideContainer,Size=UDim2.new(1,0,0,410),BackgroundTransparency=1})
+local loadInspector=create("Frame",{Parent=sideContainer,Size=UDim2.new(1,0,0,470),BackgroundTransparency=1})
 label(loadInspector,"ПОСТРОЙКА",UDim2.fromOffset(16,14),UDim2.new(1,-32,0,22),10,"muted","medium")
-label(loadInspector,"Сохранение и размещение",UDim2.fromOffset(16,42),UDim2.new(1,-32,0,25),12,"text","medium")
-place(btnMode,loadInspector,UDim2.fromOffset(16,72),UDim2.new(1,-32,0,32),"Выбрать игроков","deep")
-place(btnSave,loadInspector,UDim2.fromOffset(16,110),UDim2.new(1,-32,0,32),"Сохранить их блоки","deep")
-label(loadInspector,"ТРАНСФОРМАЦИЯ",UDim2.fromOffset(16,157),UDim2.new(1,-32,0,20),10,"muted","medium")
-place(btnSnap,loadInspector,UDim2.fromOffset(16,184),UDim2.new(1,-32,0,32),"Выровнять по сетке","deep")
-for i,b in ipairs({btnRot90,btnRot180,btnRotNeg90}) do place(b,loadInspector,UDim2.new((i-1)/3,16-(i-1)*10.5,0,224),UDim2.new(1/3,-15,0,32),({"+90°","180°","−90°"})[i],"deep") end
-place(btnToMe,loadInspector,UDim2.fromOffset(16,264),UDim2.new(1,-32,0,32),"Ко мне","deep")
-label(loadInspector,"План создаётся перед строительством. Выбери шаблон рядом со «Строить».",UDim2.fromOffset(16,308),UDim2.new(1,-32,0,46),11,"muted")
+label(loadInspector,"Текущий / последний проблемный",UDim2.fromOffset(16,42),UDim2.new(1,-32,0,25),11,"muted","medium")
+place(btnMode,loadInspector,UDim2.fromOffset(16,164),UDim2.new(1,-32,0,32),"Выбрать игроков","deep")
+place(btnSave,loadInspector,UDim2.fromOffset(16,202),UDim2.new(1,-32,0,32),"Сохранить их блоки","deep")
+label(loadInspector,"ТРАНСФОРМАЦИЯ",UDim2.fromOffset(16,249),UDim2.new(1,-32,0,20),10,"muted","medium")
+place(btnSnap,loadInspector,UDim2.fromOffset(16,276),UDim2.new(1,-32,0,32),"Выровнять по сетке","deep")
+for i,b in ipairs({btnRot90,btnRot180,btnRotNeg90}) do place(b,loadInspector,UDim2.new((i-1)/3,16-(i-1)*10.5,0,316),UDim2.new(1/3,-15,0,32),({"+90°","180°","−90°"})[i],"deep") end
+place(btnToMe,loadInspector,UDim2.fromOffset(16,356),UDim2.new(1,-32,0,32),"Ко мне","deep")
+UI.skipBtn=button(loadInspector,"Пропустить блок",UDim2.fromOffset(16,72),UDim2.new(1,-32,0,32),"deep")
+UI.repairBtn=button(loadInspector,"Переделать проблемный",UDim2.fromOffset(16,110),UDim2.new(1,-32,0,32),"deep")
+UI.skipBtn.MouseButton1Click:Connect(function() if StudioHooks.control then StudioHooks.control.skip() end end)
+UI.repairBtn.MouseButton1Click:Connect(function() if StudioHooks.control then StudioHooks.control.repair() end end)
 local menu=create("Frame",{Name="MoreActions",Parent=bodyFrame,Position=UDim2.new(1,-448,0,134),Size=UDim2.fromOffset(200,86),BackgroundColor3=C_GRAY,Visible=false,ZIndex=25}) skin(menu,"panel") corners(menu,8) stroke(menu)
 place(btnClear,menu,UDim2.fromOffset(8,8),UDim2.new(1,-16,0,31),"Очистить код","deep") btnClear.ZIndex=26
 place(btnLog,menu,UDim2.fromOffset(8,47),UDim2.new(1,-16,0,31),"Скопировать журнал","deep") btnLog.ZIndex=26
@@ -4987,4 +5124,4 @@ unloadScript = function()
 end
 
 _G.AUTOBUILD_UNLOAD = unloadScript
-setStatus("ORBIT speed-7: пинг от 1,2×, FPS и маршруты по времени")
+setStatus("ORBIT control-8: пропуск, переделка и продолжение после ошибки блока")
