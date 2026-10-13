@@ -802,7 +802,7 @@ local function updateDefaultStats()
 end
 
 btnLog.MouseButton1Click:Connect(function()
-	local text="Autobuild Studio v5 / ORBIT · stairwell-20\n"..table.concat(diagnosticLog,"\n")
+	local text="Autobuild Studio v5 / ORBIT · stairwell-21\n"..table.concat(diagnosticLog,"\n")
 	if storageError then text=text.."\nStorage: "..storageError end
 	if copyText(text) then setStatus("Диагностика скопирована") else setStatus("Буфер обмена недоступен",true) end
 end)
@@ -3422,6 +3422,9 @@ local function reconcileBuild(session)
 end
 local function pauseForReset(reason)
 	if not isBuilding then return end
+	if StudioHooks.stairwell and StudioHooks.stairwell.running then
+		unlockPosition() setStatus(reason.." · жду персонажа и инструменты; Stairwell продолжится автоматически",true) return
+	end
 	_G.stopautobuild=true
 	unlockPosition()
 	setStatus(reason.." · план и подтверждения сохранены. После возвращения инструментов нажми «Продолжить».",true)
@@ -4140,6 +4143,12 @@ StudioHooks.control=(function()
 	function C.execute(data,index,session)
 		session.activeIndex=index data.repairInterrupt=nil data.replans=0
 		local function attempt()
+			if session.transient and StudioHooks.recovery.arrived(data,session) then
+				for _,holder in ipairs(data.work and data.work.helpers or {}) do
+					if holder.creation then local ok,err=StudioHooks.recovery.inspect(holder,session) if not ok then return false,err end end
+				end
+				if data.creation then local ok,err=StudioHooks.recovery.inspect(data,session) if not ok then return false,err end end
+			end
 			if StudioHooks.guard then
 				local ok,message=StudioHooks.guard.clearBox(session,session.models[index],data.placedBrick)
 				if not ok then return false,message end
@@ -4604,6 +4613,7 @@ local function runBuilderEngine(buildString,offset,prepareOnly)
 	local skipped=0
 	for _,data in ipairs(session.blocks) do if data.skipped then skipped+=1 end end
 	if _G.autobuildPlaced<#session.blocks then
+		if session.transient then return false,string.format("Подтверждено %d/%d · ожидаю автоматическую сверку текущего этажа",_G.autobuildPlaced,#session.blocks) end
 		return false,string.format("Обход завершён: готово %d/%d · пропущено %d · ожидают восстановления %d. Продолжить / переделать проблемный блок.",_G.autobuildPlaced,#session.blocks,skipped,#session.blocks-_G.autobuildPlaced-skipped)
 	end
 	if StudioHooks.stairwell and StudioHooks.guard.preserve(session) then local ok,err=StudioHooks.stairwell.activatePits(session) if not ok then return false,err end end
@@ -5372,7 +5382,7 @@ StudioHooks.stairwell=(function()
 	function S.fastPlan(targets,scene,options)
 		options=options or {} local byGeometry,placed={},{ } local obstacles=table.clone(scene) local index=Planner.spatial(obstacles) local targetIndex=Planner.spatial(targets)
 		for _,m in ipairs(scene) do if m.eligible then byGeometry[geometryKey(m)]=m end if m.instance and type(m.id)=="string" and m.id:match("^t:%d+$") then placed[m.id]=m end end
-		local plan={name="Stairwell · готовые модули",items={},operations=0,shapeSteps=0,helpers=0,alternatives={},templateVersion=20}
+		local plan={name="Stairwell · готовые модули",items={},operations=0,shapeSteps=0,helpers=0,alternatives={},templateVersion=21}
 		local blueprints=options.blueprints or {} local compiledCount=0 local cacheHits=0
 		for i,target in ipairs(targets) do
 			if options.cancelled and options.cancelled() then error("Подготовка остановлена",0) end
@@ -5390,6 +5400,22 @@ StudioHooks.stairwell=(function()
 				if target.size==Vector3.new(4,4,4) then initial={pos=target.pos,size=target.size} kind="normal"
 				else initial={pos=target.pos-target.size/2+Vector3.new(.5,.5,.5),size=Vector3.new(1,1,1)} kind="detailed" end
 				recipe=Planner.recipe(initial,target,nil,kind)
+			end
+			-- Growing a copied lower stair inside the final box saves repeated 1-cube seeds.
+			-- Exclude oversize/outside clones: no temporary volume enters another step.
+			if recipe and recipe.shapeSteps>0 and recipe.kind~="reuse" then
+				local lo,hi=target.pos-target.size/2,target.pos+target.size/2
+				local focus={pos=target.pos,size=target.size+Vector3.new(8,8,8)}
+				for _,source in ipairs(index:query(focus)) do if source.eligible~=false then
+					for _,dir in ipairs(Planner.directions) do
+						local initial={pos=source.pos+dir.unit*source.size[dir.axis],size=source.size}
+						local a,b=initial.pos-initial.size/2,initial.pos+initial.size/2
+						if a.X>=lo.X-.005 and a.Y>=lo.Y-.005 and a.Z>=lo.Z-.005 and b.X<=hi.X+.005 and b.Y<=hi.Y+.005 and b.Z<=hi.Z+.005 then
+							local candidate=Planner.recipe(initial,target,source,"clone",dir.face)
+							if candidate and candidate.operations<recipe.operations then recipe=candidate end
+						end
+					end
+				end end
 			end
 			if options.partials and options.partials[i] then recipe=Planner.chooseLive(target,{},obstacles,targets,false,options.partials[i]) end
 			if not recipe then error("Не найден рецепт модуля "..i,0) end
@@ -5464,7 +5490,7 @@ StudioHooks.stairwell=(function()
 		end
 		exits[turn]=turn~="end" or nil if fake then exits[fake]=true end
 		-- No trim or rails: thick grids, low beams and differently sized chambers.
-		cubes(Vector3.new(-8,-4,0),Vector3.new(width-8,0,depth))
+		if level>1 then cubes(Vector3.new(-8,-4,0),Vector3.new(width-8,0,depth)) end
 		if level>1 then cubes(Vector3.new(-8,12,0),Vector3.new(width-8,16,depth)) end
 		if level>1 then
 			cubes(Vector3.new(-8,0,0),Vector3.new(-4,12,4))
@@ -5759,9 +5785,27 @@ StudioHooks.stairwell=(function()
 					local floor=S.last.path[level] local session=floor.session
 					S.context=session resumeSession=session
 					status(string.format("Строю этаж %d/%d",level,#S.last.path))
-					local finished,err=runBuilderEngine(session.text,session.offset,false)
-					if not finished then return false,"Этаж "..level.." · "..tostring(err) end
+					local function executeFloor()
+						local finished,err=runBuilderEngine(session.text,session.offset,false)
+						if finished then
+							for i,data in ipairs(session.blocks) do
+								if not matchesAll(data.placedBrick,data) then session.done[i]=nil return false,"Деталь "..i.." изменилась · восстанавливаю перед переходом" end
+							end
+						end
+						return finished,err
+					end
+					local finished,err=executeFloor()
+					while not finished and not cancelled() do
+						-- Keep one active run across late replies, missing tools and blocked recipes.
+						-- Wait before resuming the SAME session; never throw away pending commands.
+						status("Этаж "..level.." · жду подтверждения / восстановления · "..tostring(err),true)
+						local untilTime=os.clock()+math.max(.5,roundTripPing()*2,StudioHooks.timing.profile().frame*4)
+						while not cancelled() and os.clock()<untilTime do task.wait(.1) end
+						if not cancelled() then finished,err=executeFloor() end
+					end
+					if not finished then return false,"Пауза · этаж "..level.." · "..tostring(err) end
 					floor.complete=true S.last.floor=level+1
+					status(string.format("Этаж %d построен · %s",level,level<#S.last.path and "строю следующий" or "готово"))
 					local visuals=S.previewRows[level] or {} for _,v in pairs(visuals) do if v.Parent then v:Destroy() end end S.previewRows[level]=nil
 					for _,v in ipairs(S.previewRoutes and S.previewRoutes[level] or {}) do if v.Parent then v:Destroy() end end if S.previewRoutes then S.previewRoutes[level]=nil end
 				end
@@ -6440,7 +6484,10 @@ trackConn(stairRegenerate.MouseButton1Click:Connect(function()
 	local options={} for key,f in pairs(stairFields) do options[key]=f.Text:gsub(",",".") end
 	S.regenerate(options) for key,f in pairs(stairFields) do f.Text=tostring(S.options[key]) end
 end))
-StudioHooks.stairStatus=function(message) stairStatus.Text=message end
+StudioHooks.stairStatus=function(message)
+	stairStatus.Text=message
+	local S=StudioHooks.stairwell stairBuild.Text=S and S.running and "Пауза" or "Строить / продолжить"
+end
 local otherExtraHit=UI.extraHit
 function UI.extraHit(point)
 	local p,s=stairWindow.AbsolutePosition,stairWindow.AbsoluteSize
@@ -7524,4 +7571,4 @@ unloadScript = function()
 end
 
 _G.AUTOBUILD_UNLOAD = unloadScript
-setStatus("ORBIT stairwell-20: открытый вход у ног, подъём по этажам и быстрые шаблоны")
+setStatus("ORBIT stairwell-21: этажи без ручного продолжения, быстрые ступени, вход без пола")
