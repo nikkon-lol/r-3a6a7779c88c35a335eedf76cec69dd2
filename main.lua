@@ -5789,11 +5789,14 @@ return V
 		end
 	end))
 	StudioHooks.close=function()
-		ToolView.clear()
-		sceneRevision+=1
-		persistHistory()
-		for _,tool in pairs(tools) do tool:Destroy() end
-		scene:Destroy()
+		sceneRevision+=1 pendingContent=nil held=false pressPoint=nil
+		local errors={}
+		local function closeStep(fn) local ok,err=pcall(fn) if not ok then errors[#errors+1]=tostring(err) end end
+		closeStep(function() ToolView.clear() end)
+		closeStep(persistHistory)
+		for _,tool in pairs(tools) do closeStep(function() tool:Destroy() end) end
+		closeStep(function() scene:Destroy() end)
+		if #errors>0 then error(table.concat(errors,"; "),0) end
 	end
 	syncVisibility()
 	setStatus("Выбери режим: локальная мастерская или загрузка постройки")
@@ -5833,29 +5836,57 @@ end))
 -- FULL UNLOAD LOGIC
 -- ============================================================================
 unloadScript = function()
-	if StudioHooks.guard then StudioHooks.guard.close() end
-	if resumeSession and StudioHooks.recovery then StudioHooks.recovery.capture(resumeSession) StudioHooks.recovery.close() end
-	saveData()
-	if StudioHooks.close then StudioHooks.close() end
-	unloaded = true
-	_G.stopautobuild = true
-	_G.autobuildRunning = false
-	isBuilding = false
-
-	for _, conn in ipairs(connections) do
-		pcall(function() conn:Disconnect() end)
+	if StudioHooks.unloadComplete then return true,{} end
+	-- Cancellation must precede persistence: failed saves cannot leave jobs alive.
+	unloaded=true _G.stopautobuild=true _G.autobuildRunning=false
+	_G.autobuildPreparing=false isBuilding=false
+	if StudioHooks.documents then StudioHooks.documents.pendingUI=nil end
+	local errors={}
+	local function step(name,fn)
+		local ok,err=pcall(fn)
+		if not ok then errors[#errors+1]=name..": "..tostring(err) end
 	end
+	step("Защита",function() if StudioHooks.guard then StudioHooks.guard.close() end end)
+	local sessions={} local seen={}
+	local function include(session)
+		if type(session)=="table" and not seen[session] then seen[session]=true sessions[#sessions+1]=session end
+	end
+	include(resumeSession)
+	if StudioHooks.documents then
+		for _,session in pairs(StudioHooks.documents.jobs) do include(session) end
+		for _,session in pairs(StudioHooks.documents.orphans) do include(session) end
+	end
+	for _,session in ipairs(sessions) do
+		step("Состояние работы",function() if StudioHooks.recovery then StudioHooks.recovery.capture(session) end end)
+		local function closeHolder(holder)
+			local function disconnect(request)
+				if request and request.connection then step("Ответ создания",function() request.connection:Disconnect() end) end
+			end
+			disconnect(holder.creation)
+			for _,request in ipairs(holder.retired or {}) do disconnect(request) end
+		end
+		for _,block in ipairs(session.blocks or {}) do
+			closeHolder(block)
+			for _,helper in ipairs(block.work and block.work.helpers or {}) do closeHolder(helper) end
+		end
+	end
+	if resumeSession then _G.AUTOBUILD_RESUME={version=2,job=game.JobId,session=resumeSession} end
+	step("Наблюдение ответов",function() if StudioHooks.recovery then StudioHooks.recovery.close() end end)
+	step("Сохранение вкладок",saveData)
+	step("Мастерская",function() if StudioHooks.close then StudioHooks.close() end end)
+	for _,conn in ipairs(connections) do step("Обработчик",function() conn:Disconnect() end) end
 	table.clear(connections)
-
-	unlockPosition()
-	stopToolForcing()
-	disableNoclip()
-	cleanupVisuals(false)
-
-	pcall(function() gui:Destroy() end)
-	-- Destroy only this instance; a reloaded script owns its own GUI.
-
-	_G.AUTOBUILD_UNLOAD = nil
+	step("Удержание позиции",unlockPosition)
+	step("Экипировка",stopToolForcing)
+	step("Столкновения персонажа",disableNoclip)
+	step("Предпросмотр",function() cleanupVisuals(false) end)
+	step("Интерфейс",function() gui:Destroy() end)
+	_G.visualsEnabled=false
+	StudioHooks.unloadComplete=#errors==0
+	-- Keep the callback on failure so a second invocation can retry cleanup.
+	if StudioHooks.unloadComplete and _G.AUTOBUILD_UNLOAD==unloadScript then _G.AUTOBUILD_UNLOAD=nil end
+	for _,err in ipairs(errors) do warn("ORBIT UNLOAD: "..err) end
+	return StudioHooks.unloadComplete,errors
 end
 
 _G.AUTOBUILD_UNLOAD = unloadScript
