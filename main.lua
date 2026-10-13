@@ -794,7 +794,7 @@ local function updateDefaultStats()
 end
 
 btnLog.MouseButton1Click:Connect(function()
-	local text="Autobuild Studio v5 / ORBIT · indexed-14\n"..table.concat(diagnosticLog,"\n")
+	local text="Autobuild Studio v5 / ORBIT · companion-15\n"..table.concat(diagnosticLog,"\n")
 	if storageError then text=text.."\nStorage: "..storageError end
 	if copyText(text) then setStatus("Диагностика скопирована") else setStatus("Буфер обмена недоступен",true) end
 end)
@@ -4152,6 +4152,7 @@ StudioHooks.guard=(function()
 		setStatus(key=="enabled" and (G.enabled and "Защита постройки включена" or "Защита постройки выключена") or (G.clear and "Расчистка пересекающих блоков включена" or "Расчистка выключена"))
 	end
 	function G.formChanged(brick,data)
+		if StudioHooks.extras and StudioHooks.extras.owns(brick) then return false end
 		if not brick or not brick.Parent then return false end
 		if brick.Name~="Brick" or not brick.Anchored then return true end
 		for _,axis in ipairs({"X","Y","Z"}) do
@@ -4169,6 +4170,7 @@ StudioHooks.guard=(function()
 		return false
 	end
 	function G.protected(session,brick)
+		if StudioHooks.extras and StudioHooks.extras.owns(brick) then return true end
 		if session.helpers[brick] or StudioHooks.documents and StudioHooks.documents.pendingPart(session,brick) then return true end
 		local id=session.ids[brick] local index=type(id)=="string" and tonumber(id:match("^t:(%d+)$"))
 		local data=index and session.blocks[index]
@@ -4290,6 +4292,7 @@ StudioHooks.guard=(function()
 	end
 	function G.dirty(session,index)
 		local data=session.blocks[index]
+		if StudioHooks.extras and StudioHooks.extras.owns(data.placedBrick) then return end
 		if not G.enabled or G.session~=session or session~=resumeSession or session.buildId~=PlanLibrary.id() or not session.done[index] or data.skipped then return end
 		local brick=data.placedBrick
 		if matchesAll(brick,data) and not G.formChanged(brick,data) then return end
@@ -4571,6 +4574,7 @@ local function runBuilderEngine(buildString,offset,prepareOnly)
 	return true,string.format("Готово: %d блоков · созданий %d · изменений граней %d · удалений временных %d",#session.blocks,session.actual.creates,session.actual.shapes,session.actual.deletes)
 end
 local function launchAction(forcePreparation)
+	if StudioHooks.extras and (StudioHooks.extras.running or StudioHooks.extras.busy) then setStatus("Сначала останови двойника",true) return end
 	if busySaving then setStatus("Дождитесь сохранения") return end
 	if isBuilding then _G.stopautobuild=true btnStart.Text="ОСТАНОВКА…" setStatus("Останавливаю; отправленный запрос может завершиться") return end
 	if resumeSession then resumeSession.guardClearOnly=StudioHooks.guard and StudioHooks.guard.autoClearOnly==true or false end
@@ -4601,6 +4605,302 @@ local function launchAction(forcePreparation)
 		if StudioHooks.documents then StudioHooks.documents.flushUI() end
 	end)
 end
+-- Six tagged, confirmed own blocks. No world-wide pickup and no avatar scripts.
+StudioHooks.extras=(function()
+	local E={busy=false,running=false,message="Двойник R6 · шесть твоих блоков",distance=14,side="back",movers={}}
+	local names={"Head","Torso","Left Arm","Right Arm","Left Leg","Right Leg"}
+	local positions={Vector3.new(0,1.5,0),Vector3.zero,Vector3.new(-1.5,0,0),Vector3.new(1.5,0,0),Vector3.new(-.5,-2,0),Vector3.new(.5,-2,0)}
+	local stateFile="OrbitCompanion.json"
+	local function say(message,failure)
+		E.message=message
+		if StudioHooks.extraStatus then StudioHooks.extraStatus(message) end
+		setStatus(message,failure)
+	end
+	local function own(part)
+		local folder=getPlayerBricksFolder()
+		return part and part.Parent and folder and part:IsDescendantOf(folder) and part:IsA("BasePart") and part.Name=="Brick"
+	end
+	local function avatar()
+		local char=LocalPlayer.Character local hum=char and char:FindFirstChildOfClass("Humanoid") local root=char and char:FindFirstChild("HumanoidRootPart")
+		if not hum or not root or hum.Health<=0 or hum.RigType~=Enum.HumanoidRigType.R6 then return nil,"Нужен живой персонаж R6" end
+		local body={root=root,char=char}
+		for i,name in ipairs(names) do local part=char:FindFirstChild(name) if not part or not part:IsA("BasePart") then return nil,"Не найдена конечность "..name end body[i]=part end
+		return body
+	end
+	local function token()
+		local ok,id=pcall(function() return HttpService:GenerateGUID(false) end)
+		return ok and id or tostring(os.time()).."_"..tostring(math.random(1,100000000))
+	end
+	local function model(row)
+		return {centerPos=row.pos,size=row.size,color=row.color,material=Enum.Material.SmoothPlastic,canCollide=true,sprays={}}
+	end
+	local function code(rows)
+		local blocks={} for _,row in ipairs(rows) do blocks[#blocks+1]=serializeBlock(model(row)) end return table.concat(blocks)
+	end
+	local function validRecord(record)
+		return E.data and own(record.part) and record.part:GetAttribute("OrbitCompanionId")==E.data.token and record.part:GetAttribute("OrbitCompanionBody")==record.name
+	end
+	function E.owns(part)
+		if not E.data or not part then return false end
+		for _,record in ipairs(E.data.records or {}) do if record.part==part and validRecord(record) then return true end end
+		return false
+	end
+	function E.save()
+		if not writefile then return false,"Нет записи файлов" end
+		local payload={version=1,distance=E.distance,side=E.side,job=game.JobId}
+		if E.data then
+			payload.token=E.data.token payload.stageId=E.data.stageId payload.code=E.data.code payload.records={}
+			for i,record in ipairs(E.data.records) do
+				payload.records[i]={name=record.name,neutral=serializeBlock(model(E.data.rows[i])),pending=record.pending,original=record.original}
+			end
+		end
+		local ok,err=pcall(function() writefile(stateFile,HttpService:JSONEncode(payload)) end)
+		return ok,err
+	end
+	local cached=_G.ORBIT_COMPANION_STATE
+	if type(cached)=="table" and cached.version==1 and cached.job==game.JobId and type(cached.rows)=="table" and type(cached.records)=="table" and #cached.rows==6 and #cached.records==6 then E.data=cached end
+	if readfile and isfile then pcall(function()
+		if not isfile(stateFile) then return end
+		local saved=HttpService:JSONDecode(readfile(stateFile)) if type(saved)~="table" or saved.version~=1 then return end
+		if type(saved.distance)=="number" and saved.distance==saved.distance then E.distance=math.clamp(saved.distance,0,64) end
+		if ({back=true,front=true,left=true,right=true})[saved.side] then E.side=saved.side end
+		if E.data or saved.job~=game.JobId or type(saved.token)~="string" or type(saved.stageId)~="string" or type(saved.code)~="string" or type(saved.records)~="table" or #saved.records~=6 then return end
+		local data={version=1,job=game.JobId,token=saved.token,stageId=saved.stageId,code=saved.code,rows={},records={}}
+		for i,s in ipairs(saved.records) do
+			if type(s)~="table" or s.name~=names[i] or type(s.neutral)~="string" then return end
+			local parsed,bad=parseBlocks(s.neutral,Vector3.zero) if bad>0 or #parsed~=1 then return end
+			local b=parsed[1] data.rows[i]={pos=b.centerPos,size=b.size,color=b.color}
+			data.records[i]={name=names[i],pending=type(s.pending)=="table" and s.pending or {},original=type(s.original)=="table" and s.original or nil}
+		end
+		local stage,bad=parseBlocks(data.code,Vector3.zero) if bad>0 or #stage~=6 then return end
+		for i,b in ipairs(stage) do if b.centerPos~=data.rows[i].pos or b.size~=data.rows[i].size or not sameColor(b.color,data.rows[i].color) or b.material~=Enum.Material.SmoothPlastic or #b.sprays>0 then return end end
+		local folder=getPlayerBricksFolder()
+		if folder then for _,part in ipairs(folder:GetDescendants()) do if part:IsA("BasePart") and part:GetAttribute("OrbitCompanionId")==data.token then
+			for _,r in ipairs(data.records) do if r.name==part:GetAttribute("OrbitCompanionBody") then if r.part then return end r.part=part end end
+		end end end
+		E.data=data
+	end) end
+	if E.data then _G.ORBIT_COMPANION_STATE=E.data E.message="Модель сохранена · запусти или верни блоки" end
+	function E.setDistance(value)
+		value=tonumber(value) if not value or value~=value or math.abs(value)==math.huge then return false end
+		E.distance=math.clamp(value,0,64) E.save() return true
+	end
+	function E.setSide(value)
+		if not ({back=true,front=true,left=true,right=true})[value] then return false end
+		E.side=value E.save() return true
+	end
+	local function interrupted() return unloaded or E.cancel or _G.stopautobuild==true end
+	local function waitFor(predicate,seconds)
+		local deadline=os.clock()+seconds
+		repeat if interrupted() then return false end if predicate() then return true end task.wait() until os.clock()>=deadline
+		return not interrupted() and predicate()
+	end
+	local function release()
+		E.running=false E.rootPose=nil E.parked=false
+		if E.connection then E.connection:Disconnect() E.connection=nil end
+		for part,mover in pairs(E.movers) do
+			for _,object in ipairs(mover.objects) do pcall(function() object:Destroy() end) end
+			if part.Parent then pcall(function() part.CanTouch=mover.touch part.CustomPhysicalProperties=mover.physical end) end
+		end
+		E.movers={}
+	end
+	local function createMover(record)
+		if E.movers[record.part] then return E.movers[record.part] end
+		if not validRecord(record) then error("Блок двойника больше не принадлежит этой модели",0) end
+		local part=record.part local mover={objects={},touch=part.CanTouch,physical=part.CustomPhysicalProperties}
+		E.movers[part]=mover
+		local function object(class,properties) local made=create(class,properties) mover.objects[#mover.objects+1]=made return made end
+		local attachment=object("Attachment",{Name="OrbitCompanionAttachment",Parent=part})
+		local mass=math.max(.1,part:GetMass())
+		mover.position=object("AlignPosition",{Name="OrbitCompanionPosition",Parent=part,Attachment0=attachment,Mode=Enum.PositionAlignmentMode.OneAttachment,Position=part.Position,ApplyAtCenterOfMass=true,ReactionForceEnabled=false,RigidityEnabled=false,Responsiveness=100,MaxVelocity=80,MaxForce=mass*80000})
+		mover.orientation=object("AlignOrientation",{Name="OrbitCompanionOrientation",Parent=part,Attachment0=attachment,Mode=Enum.OrientationAlignmentMode.OneAttachment,AlignType=Enum.AlignType.AllAxes,CFrame=part.CFrame.Rotation,ReactionTorqueEnabled=false,RigidityEnabled=false,Responsiveness=100,MaxAngularVelocity=40,MaxTorque=mass*80000})
+		part.CanTouch=false part.CustomPhysicalProperties=PhysicalProperties.new(.1,0,0,0,0)
+		return mover
+	end
+	local function pose(record,goal)
+		local mover=createMover(record) mover.position.Position=goal.Position mover.orientation.CFrame=goal.Rotation
+	end
+	local function desiredRoot(root)
+		local d=E.distance local offset=E.side=="front" and Vector3.new(0,0,-d) or E.side=="left" and Vector3.new(-d,0,0) or E.side=="right" and Vector3.new(d,0,0) or Vector3.new(0,0,d)
+		return root*CFrame.new(offset)
+	end
+	function E.targets(body,dt)
+		local desired=desiredRoot(body.root.CFrame)
+		E.rootPose=E.rootPose and E.rootPose:Lerp(desired,1-math.exp(-math.min(dt or 1/60,.1)*14)) or desired
+		local targets={}
+		for i,part in ipairs(body) do targets[i]=E.rootPose*body.root.CFrame:ToObjectSpace(part.CFrame) end
+		return targets
+	end
+	local function toggle(record,property,wanted)
+		if property~="Anchored" and property~="CanCollide" then return false,"Неподдерживаемое свойство" end
+		if not validRecord(record) then return false,"Нельзя изменять чужой или заменённый блок" end
+		local part=record.part record.pending=record.pending or {}
+		local pending=record.pending[property]
+		if pending then
+			if not waitFor(function() return not part.Parent or part[property]==pending.desired end,responseTimeout(5)) then return false,"Ожидаю прежний "..property.."; повтор не отправлен" end
+			record.pending[property]=nil E.save()
+		end
+		if not validRecord(record) then return false,"Блок исчез" end
+		if part[property]==wanted then return true end
+		if not ensureNear(part.Position) then return false,"Не удалось подойти к блоку" end
+		local tool=awaitTool("Paint") local hrp=getValidHRP()
+		if not tool or not hrp or interrupted() then return false,"Нужен настоящий Paint" end
+		-- Intent is retained before this non-idempotent server toggle.
+		record.pending[property]={desired=wanted,at=os.time()} E.save()
+		local ok,err=pcall(function() tool.event:FireServer(part,Enum.NormalId.Top,hrp.Position,"material",part.Color,property=="Anchored" and "anchor" or "collide","") end)
+		if not ok then return false,tostring(err) end
+		if not waitFor(function() return not part.Parent or part[property]==wanted end,responseTimeout(5)) then return false,property.." не подтверждено; запрос сохранён" end
+		if not validRecord(record) then return false,"Блок удалён" end
+		record.pending[property]=nil E.save() return true
+	end
+	E.toggle=toggle
+	local function checked(result,message) if not result then error(message or "Действие не подтверждено",0) end end
+	local function activate(body)
+		local current=avatar()
+		checked(current and current.char==body.char,"Персонаж сменился · запусти двойника снова")
+		body=current
+		for i,record in ipairs(E.data.records) do
+			checked(validRecord(record),"Не хватает одного из шести блоков")
+			checked((record.part.Size-E.data.rows[i].size).Magnitude<.05,"Размер блока двойника изменён")
+			record.original=record.original or {collide=record.part.CanCollide,touch=record.part.CanTouch}
+			pose(record,CFrame.new(E.data.rows[i].pos))
+			checked(toggle(record,"CanCollide",false))
+			checked(toggle(record,"Anchored",false))
+			local wanted=model(E.data.rows[i]) wanted.color=body[i].Color
+			checked(paintBlock(record.part,wanted),"Цвет конечности не подтверждён")
+		end
+		-- Unlock before capturing the following target; building temporarily moves us.
+		checked(not interrupted(),"Действие остановлено")
+		unlockPosition() stopToolForcing() disableNoclip()
+		E.running=true E.cancel=false E.sourceCharacter=body.char E.rootPose=nil
+		local elapsed=0 local reportAt=0
+		E.connection=RunService.Heartbeat:Connect(function(dt)
+			if unloaded or not E.running then return end
+			elapsed+=dt if elapsed<1/30 then return end local step=elapsed elapsed=0
+			local current=avatar()
+			if not current or current.char~=E.sourceCharacter then release() E.save() say("Персонаж сменился · верни блоки или запусти снова",true) return end
+			local ok,err=pcall(function()
+				local targets=E.targets(current,step) E.maxError=0 E.ownedCount=0
+				for i,record in ipairs(E.data.records) do
+					checked(validRecord(record),"Один из блоков удалён или заменён")
+					checked((record.part.Size-E.data.rows[i].size).Magnitude<.05,"Изменился размер блока")
+					pose(record,targets[i]) E.maxError=math.max(E.maxError,(record.part.Position-targets[i].Position).Magnitude)
+					if isnetworkowner then local available,owned=pcall(isnetworkowner,record.part) if available and owned then E.ownedCount+=1 end end
+				end
+			end)
+			if not ok then release() E.save() say(tostring(err),true) return end
+			reportAt+=step if reportAt>=.5 then reportAt=0 if StudioHooks.extraStatus then StudioHooks.extraStatus(string.format("Следует · %.0f стад. · погрешность %.1f",E.distance,E.maxError or 0)) end end
+		end)
+		E.save() say("Двойник следует и повторяет позы R6")
+	end
+	local function runAction(action)
+		if E.busy or _G.autobuildRunning or busySaving or unloaded then say("Дождись текущей операции или останови её",true) return false end
+		local character=LocalPlayer.Character local returnRoot=character and character:FindFirstChild("HumanoidRootPart")
+		E.returnRoot=returnRoot E.returnPose=returnRoot and returnRoot.CFrame
+		E.busy=true E.cancel=false _G.stopautobuild=false _G.autobuildRunning=true isBuilding=true textBox.TextEditable=false
+		task.spawn(function()
+			local ok,err=pcall(function() enableNoclip() startToolForcing() action() end)
+			if not ok then release() end
+			pcall(unlockPosition) pcall(stopToolForcing) pcall(disableNoclip) isBuilding=false E.busy=false
+			if unloaded then return end
+			if E.returnRoot and E.returnRoot.Parent and LocalPlayer.Character==character then E.returnRoot.CFrame=E.returnPose end
+			E.returnRoot=nil E.returnPose=nil
+			_G.autobuildRunning=false textBox.TextEditable=true
+			if resumeSession then pcall(StudioHooks.recovery.capture,resumeSession,"flush") end
+			E.save() if not ok then say(tostring(err),true) end
+			if StudioHooks.documents then StudioHooks.documents.flushUI() end
+			if E.afterStop then E.afterStop=nil task.defer(function() E.restore() end) end
+		end)
+		return true
+	end
+	local function newData(body)
+		local origin=body.root.Position local rows
+		local root=workspace:FindFirstChild("Bricks")
+		for _,shift in ipairs({Vector3.new(8,0,8),Vector3.new(-8,0,8),Vector3.new(12,0,-8),Vector3.new(-12,0,-8),Vector3.new(16,0,12)}) do
+			local center=Vector3.new(math.floor(origin.X)+shift.X,math.floor(origin.Y+.5),math.floor(origin.Z)+.5+shift.Z)
+			local candidate={} local clear=true
+			for i,part in ipairs(body) do
+				local size=Vector3.new(math.clamp(math.round(part.Size.X),1,4),math.clamp(math.round(part.Size.Y),1,4),math.clamp(math.round(part.Size.Z),1,4))
+				local p=center+positions[i] local edge=p-size/2
+				p=Vector3.new(math.floor(edge.X+.5),math.floor(edge.Y+.5),math.floor(edge.Z+.5))+size/2
+				candidate[i]={pos=p,size=size,color=part.Color}
+				if root then for _,other in ipairs(StudioHooks.liveWorld.query(root,candidate[i])) do
+					local box=StudioHooks.guard.worldBox(other) if Planner.intersects(candidate[i],box) then clear=false break end
+				end end
+			end
+			if clear then rows=candidate break end
+		end
+		if not rows then return nil,"Нет свободного места рядом для шести блоков" end
+		local id=token() local data={version=1,job=game.JobId,token=id,stageId="companion_"..id,rows=rows,records={},code=code(rows)}
+		for i,name in ipairs(names) do data.records[i]={name=name,pending={}} end
+		return data
+	end
+	function E.create()
+		if E.running then say("Двойник уже запущен") return false end
+		if E.busy or _G.autobuildRunning or busySaving or unloaded then say("Сначала останови текущую работу",true) return false end
+		local body,err=avatar() if not body then say(err,true) return false end
+		if not E.data then local data,message=newData(body) if not data then say(message,true) return false end E.data=data _G.ORBIT_COMPANION_STATE=data end
+		local all=true for _,r in ipairs(E.data.records) do if not validRecord(r) then all=false break end end
+		if all then return runAction(function() activate(body) end) end
+		for _,r in ipairs(E.data.records) do if validRecord(r) and (not r.part.Anchored or next(r.pending or {})) then say("Сначала верни оставшиеся блоки",true) return false end end
+		if not StudioHooks.stageCompanion then say("Каталог ещё не готов",true) return false end
+		StudioHooks.stageCompanion(E.data.code,E.data.stageId)
+		E.save()
+		return runAction(function()
+			say("Строю шесть блоков двойника")
+			local complete,message=runBuilderEngine(E.data.code,Vector3.zero,false)
+			checked(not unloaded,"ORBIT выгружен")
+			if resumeSession and resumeSession.buildId==E.data.stageId then
+				for i,b in ipairs(resumeSession.blocks) do if own(b.placedBrick) and geometryMatches(b.placedBrick,b) then
+					local r=E.data.records[i] r.part=b.placedBrick
+					r.part:SetAttribute("OrbitCompanionId",E.data.token) r.part:SetAttribute("OrbitCompanionBody",r.name)
+				end end
+			end
+			E.save() checked(complete,message)
+			cleanupVisuals(true) activate(body)
+		end)
+	end
+	function E.restore()
+		if E.busy then E.afterStop=true E.cancel=true _G.stopautobuild=true say("Останавливаю; затем верну блоки") return false end
+		if not E.data then say("Модель ещё не создана") return false end
+		release()
+		return runAction(function()
+			say("Возвращаю блоки на место")
+			local available=0
+			for i,r in ipairs(E.data.records) do if validRecord(r) then
+				available+=1 pose(r,CFrame.new(E.data.rows[i].pos))
+				if not r.part.Anchored then checked(waitFor(function() return (r.part.Position-E.data.rows[i].pos).Magnitude<.2 and (r.part.CFrame.RightVector-Vector3.new(1,0,0)).Magnitude<.05 and (r.part.CFrame.UpVector-Vector3.new(0,1,0)).Magnitude<.05 end,6),"Не удалось вернуть блок: нет физического контроля") end
+				checked(toggle(r,"Anchored",true))
+				checked(toggle(r,"CanCollide",r.original and r.original.collide~=false or not r.original))
+			end end
+			release() say("Остановлен · возвращено "..available.."/6 блоков")
+		end)
+	end
+	function E.close()
+		E.cancel=true E.afterStop=nil release()
+		if E.returnRoot and E.returnRoot.Parent then pcall(function() E.returnRoot.CFrame=E.returnPose end) end
+		E.returnRoot=nil E.returnPose=nil
+		local ok,err=E.save()
+		if _G.ORBIT_COMPANION_API==E then _G.ORBIT_COMPANION_API=nil end
+		if not ok and writefile then error(err,0) end
+	end
+	function E.snapshot()
+		local body,err=avatar() local result={version=1,running=E.running,busy=E.busy,message=E.message,distance=E.distance,side=E.side,rig=body and "R6" or err,parts={},error=E.maxError}
+		if E.data then for i,r in ipairs(E.data.records) do
+			local part=r.part result.parts[i]={name=r.name,own=validRecord(r)==true,present=part and part.Parent~=nil or false,anchored=part and part.Anchored,collide=part and part.CanCollide,pos=part and part.Position,size=part and part.Size,color=part and colorHex(part.Color),pending=r.pending,goal=E.movers[part] and E.movers[part].position.Position}
+			local item=result.parts[i] local mover=E.movers[part]
+			if part and part.Parent then
+				if isnetworkowner then local ok,value=pcall(isnetworkowner,part) if ok then item.networkOwner=value==true end end
+				if mover then item.axisError=math.max((part.CFrame.RightVector-mover.orientation.CFrame.RightVector).Magnitude,(part.CFrame.UpVector-mover.orientation.CFrame.UpVector).Magnitude) end
+				pcall(function() local assembly=part.AssemblyRootPart item.assemblyRoot=assembly and assembly.Name item.assemblyAnchored=assembly and assembly.Anchored item.connected=#part:GetConnectedParts(true) end)
+			end
+		end end
+		return result
+	end
+	_G.ORBIT_COMPANION_API=E
+	return E
+end)()
+
 StudioHooks.resumeRecovery=function() launchAction(false) end
 btnStart.MouseButton1Click:Connect(function() launchAction(false) end)
 
@@ -4936,9 +5236,10 @@ local rail=create("Frame",{Name="Navigation",Parent=bodyFrame,Size=UDim2.new(0,8
 local divider=create("Frame",{Parent=rail,Position=UDim2.new(1,-1,0,0),Size=UDim2.new(0,1,1,0),BackgroundColor3=palette.line,BorderSizePixel=0}) skin(divider,"line")
 UI.createModeBtn=button(rail,"Творить",UDim2.fromOffset(8,23),UDim2.fromOffset(68,70),"base")
 UI.loadModeBtn=button(rail,"Грузить",UDim2.fromOffset(8,104),UDim2.fromOffset(68,70),"base")
-local settingsBtn=button(rail,"Настр.",UDim2.fromOffset(8,185),UDim2.fromOffset(68,70),"base")
+UI.extrasModeBtn=button(rail,"Приколы",UDim2.fromOffset(8,185),UDim2.fromOffset(68,70),"base") UI.extrasModeBtn.Name="ExtrasMode"
+local settingsBtn=button(rail,"Настр.",UDim2.fromOffset(8,266),UDim2.fromOffset(68,70),"base")
 local consoleBtn=button(rail,"Журнал",UDim2.new(0,8,1,-91),UDim2.fromOffset(68,70),"base")
-for _,pair in ipairs({{UI.createModeBtn,"cube"},{UI.loadModeBtn,"load"},{settingsBtn,"settings"}}) do
+for _,pair in ipairs({{UI.createModeBtn,"cube"},{UI.loadModeBtn,"load"},{UI.extrasModeBtn,"orbit"},{settingsBtn,"settings"}}) do
 	local b=pair[1] b.TextSize=10 b.TextYAlignment=Enum.TextYAlignment.Bottom create("UIPadding",{Parent=b,PaddingBottom=UDim.new(0,10)}) icon(b,pair[2],UDim2.fromOffset(22,13),24,Color3.fromRGB(158,160,191))
 end
 label(consoleBtn,"≡",UDim2.fromOffset(0,7),UDim2.new(1,0,0,28),24,"muted").TextXAlignment=Enum.TextXAlignment.Center
@@ -5122,17 +5423,83 @@ label(appearance,"Right Shift скрывает окно. Перетаскива�
 refreshPing()
 StudioHooks.timingDisplay=function() if appearance.Visible then pingInfo.Text=StudioHooks.timing.summary() end end
 local appearanceOpen=false
+-- Catalog groups open a single reusable floating tool window.
+UI.extrasPage=create("ScrollingFrame",{Name="ExtrasCatalog",Parent=bodyFrame,Position=UDim2.fromOffset(108,50),Size=UDim2.new(1,-128,1,-72),BackgroundTransparency=1,CanvasSize=UDim2.fromOffset(0,280),ScrollBarThickness=3,Visible=false})
+label(UI.extrasPage,"ПРИКОЛЫ",UDim2.fromOffset(0,4),UDim2.new(1,0,0,22),11,"muted","medium")
+label(UI.extrasPage,"Инструменты открываются в отдельных окнах.",UDim2.fromOffset(0,34),UDim2.new(1,0,0,28),13,"text")
+local extrasGroup=create("Frame",{Name="UnanchorGroup",Parent=UI.extrasPage,Position=UDim2.fromOffset(0,82),Size=UDim2.new(1,0,0,160),BackgroundColor3=palette.panel}) skin(extrasGroup,"panel") corners(extrasGroup,9) stroke(extrasGroup)
+label(extrasGroup,"Unanchor",UDim2.fromOffset(18,12),UDim2.new(1,-36,0,26),17,"accent","strong")
+label(extrasGroup,"ПЕРСОНАЖИ",UDim2.fromOffset(18,46),UDim2.new(1,-36,0,20),10,"muted","medium")
+local companionOpen=button(extrasGroup,"Двойник R6   ↗",UDim2.fromOffset(18,78),UDim2.new(1,-36,0,38),"deep") companionOpen.Name="OpenR6Companion"
+label(extrasGroup,"Шесть собственных блоков · цвета тела · повторение поз",UDim2.fromOffset(18,120),UDim2.new(1,-36,0,26),11,"muted")
+local companionWindow=create("Frame",{Name="R6CompanionWindow",Parent=gui,Position=UDim2.new(.5,70,.5,-195),Size=UDim2.fromOffset(344,390),BackgroundColor3=palette.base,Visible=false,Active=true,ZIndex=80}) skin(companionWindow,"base") corners(companionWindow,11) stroke(companionWindow)
+local miniHeader=create("Frame",{Parent=companionWindow,Size=UDim2.new(1,0,0,44),BackgroundTransparency=1,Active=true})
+label(miniHeader,"Unanchor / Двойник R6",UDim2.fromOffset(16,10),UDim2.new(1,-60,0,26),13,"text","strong")
+local miniClose=button(miniHeader,"×",UDim2.new(1,-38,0,8),UDim2.fromOffset(28,28),"deep") miniClose.Name="CloseR6Companion"
+local miniStatus=label(companionWindow,"Создай модель или используй сохранённую.",UDim2.fromOffset(16,54),UDim2.new(1,-32,0,52),12,"accent") miniStatus.Name="R6CompanionStatus"
+label(companionWindow,"Отступ · стады (14 = 3,5 куба по 4)",UDim2.fromOffset(16,114),UDim2.new(1,-32,0,22),11,"muted")
+local distance=field(companionWindow,"14",UDim2.fromOffset(16,142),UDim2.fromOffset(74,32)) distance.Name="R6CompanionDistance"
+local together=button(companionWindow,"Во мне",UDim2.fromOffset(100,142),UDim2.fromOffset(100,32),"deep")
+local near=button(companionWindow,"Рядом · 14",UDim2.fromOffset(210,142),UDim2.fromOffset(118,32),"deep")
+label(companionWindow,"Расположение",UDim2.fromOffset(16,184),UDim2.new(1,-32,0,22),11,"muted")
+local directions={}
+for i,pair in ipairs({{"back","Сзади"},{"right","Справа"},{"left","Слева"},{"front","Спереди"}}) do
+	local b=button(companionWindow,pair[2],UDim2.fromOffset(16+(i-1)*80,212),UDim2.fromOffset(72,32),"deep") directions[pair[1]]=b
+	trackConn(b.MouseButton1Click:Connect(function() if StudioHooks.extras then StudioHooks.extras.setSide(pair[1]) for key,button in pairs(directions) do skin(button,key==pair[1] and "soft" or "deep") end end end))
+end
+local start=button(companionWindow,"Создать / запустить",UDim2.fromOffset(16,256),UDim2.new(1,-32,0,38),"primary") start.Name="StartR6Companion"
+local restore=button(companionWindow,"Остановить / вернуть блоки",UDim2.fromOffset(16,304),UDim2.new(1,-32,0,34),"deep") restore.Name="RestoreR6Companion"
+label(companionWindow,"Для создания нужны Build, Paint и Shape.\nПеред полной выгрузкой верни блоки этой кнопкой.",UDim2.fromOffset(16,344),UDim2.new(1,-32,0,36),10,"muted")
+for _,o in ipairs(companionWindow:GetDescendants()) do if o:IsA("GuiObject") then o.ZIndex=82 end end
+local miniOpened=false
+local function miniVisible() companionWindow.Visible=miniOpened and mainFrame.Visible end
+trackConn(mainFrame:GetPropertyChangedSignal("Visible"):Connect(miniVisible))
+trackConn(companionOpen.MouseButton1Click:Connect(function()
+	miniOpened=true miniVisible()
+	local E=StudioHooks.extras
+	if E then distance.Text=tostring(E.distance) miniStatus.Text=E.message for key,b in pairs(directions) do skin(b,key==E.side and "soft" or "deep") end end
+end))
+trackConn(miniClose.MouseButton1Click:Connect(function() miniOpened=false miniVisible() end))
+trackConn(start.MouseButton1Click:Connect(function() if StudioHooks.extras then StudioHooks.extras.create() end end))
+trackConn(restore.MouseButton1Click:Connect(function() if StudioHooks.extras then StudioHooks.extras.restore() end end))
+local function applyDistance(value)
+	if StudioHooks.extras then StudioHooks.extras.setDistance(value) distance.Text=tostring(StudioHooks.extras.distance) end
+end
+trackConn(distance.FocusLost:Connect(function() applyDistance(distance.Text:gsub(",",".")) end))
+trackConn(together.MouseButton1Click:Connect(function() applyDistance(0) end))
+trackConn(near.MouseButton1Click:Connect(function() applyDistance(14) end))
+StudioHooks.extraStatus=function(message) miniStatus.Text=message end
+function UI.extraHit(point)
+	local p,s=companionWindow.AbsolutePosition,companionWindow.AbsoluteSize
+	return companionWindow.Visible and point.X>=p.X and point.X<=p.X+s.X and point.Y>=p.Y and point.Y<=p.Y+s.Y
+end
+local miniDragging=nil
+trackConn(miniHeader.InputBegan:Connect(function(input)
+	if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then miniDragging={input=input,start=input.Position,position=companionWindow.AbsolutePosition} end
+end))
+trackConn(UserInputService.InputChanged:Connect(function(input)
+	if not miniDragging or not companionWindow.Visible then return end
+	if input.UserInputType~=Enum.UserInputType.MouseMovement and input~=miniDragging.input then return end
+	local camera=workspace.CurrentCamera local viewport=camera and camera.ViewportSize or Vector2.new(1920,1080)
+	local delta=input.Position-miniDragging.start local point=miniDragging.position+Vector2.new(delta.X,delta.Y)
+	companionWindow.Position=UDim2.fromOffset(math.clamp(point.X,0,math.max(0,viewport.X-344)),math.clamp(point.Y,0,math.max(0,viewport.Y-390)))
+end))
+trackConn(UserInputService.InputEnded:Connect(function(input) if miniDragging and input==miniDragging.input then miniDragging=nil end end))
+trackConn(UserInputService.WindowFocusReleased:Connect(function() miniDragging=nil end))
+
 local state={mode="welcome",code=false,more=false,tool=nil,paint="both"}
 local function refreshVisibility()
 	local creating=state.mode=="create"
+	local building=creating or state.mode=="load"
+	UI.extrasPage.Visible=state.mode=="extras" and not appearanceOpen
 	UI.welcome.Visible=state.mode=="welcome" and not appearanceOpen
-	tabSection.Visible=state.mode~="welcome" and not appearanceOpen
+	tabSection.Visible=building and not appearanceOpen
 	editorFrame.Visible=(state.mode=="load" or creating and state.code) and not appearanceOpen
 	UI.creator.Visible=creating and not state.code and not appearanceOpen
-	sideContainer.Visible=state.mode~="welcome" and not appearanceOpen
+	sideContainer.Visible=building and not appearanceOpen
 	loadInspector.Visible=not creating creatorInspector.Visible=creating
-	bottom.Visible=state.mode~="welcome" and not appearanceOpen
-	menu.Visible=not creating and state.more and not appearanceOpen
+	bottom.Visible=building and not appearanceOpen
+	menu.Visible=state.mode=="load" and state.more and not appearanceOpen
 	appearance.Visible=appearanceOpen
 	UI.moreBtn.Visible=not creating
 	UI.planBtn.Visible=not creating
@@ -5140,10 +5507,10 @@ local function refreshVisibility()
 	for _,b in ipairs(UI.primary) do b.Visible=not creating end
 	for _,b in ipairs(UI.extra) do b.Visible=not creating and state.more end
 	UI.selectionCopy.Visible=creating UI.selectionClear.Visible=creating UI.toCodeBtn.Visible=creating
-	UI.codeBtn.Visible=state.mode~="welcome" and not appearanceOpen
+	UI.codeBtn.Visible=building and not appearanceOpen
 	UI.codeBtn.Text=creating and (state.code and "Обзор" or "Код") or "К редактору"
-	screenTitle.Text=appearanceOpen and "Настройки" or creating and "Мастерская" or state.mode=="load" and "Загрузка постройки" or "Добро пожаловать"
-	for _,pair in ipairs({{UI.createModeBtn,creating},{UI.loadModeBtn,state.mode=="load"},{settingsBtn,appearanceOpen}}) do skin(pair[1],pair[2] and "soft" or "base",pair[2] and "accent" or "muted") end
+	screenTitle.Text=appearanceOpen and "Настройки" or creating and "Мастерская" or state.mode=="load" and "Загрузка постройки" or state.mode=="extras" and "Приколы" or "Добро пожаловать"
+	for _,pair in ipairs({{UI.createModeBtn,creating},{UI.loadModeBtn,state.mode=="load"},{UI.extrasModeBtn,state.mode=="extras"},{settingsBtn,appearanceOpen}}) do skin(pair[1],pair[2] and "soft" or "base",pair[2] and "accent" or "muted") end
 	local tool=state.tool or "mbuild"
 	UI.buildToggle.Visible=tool=="mbuild" UI.copyToggle.Visible=tool=="mbuild"
 	UI.sizeToggle.Visible=tool=="msize"
@@ -5394,6 +5761,7 @@ return UI
 	end
 	local function blocked() return unloaded or _G.autobuildRunning or busySaving or sceneLoading or pendingContent~=nil end
 	local function uiHit(point)
+		if View.extraHit and View.extraHit(point) then return true end
 		if not mainFrame.Visible then return false end
 		local p=mainFrame.AbsolutePosition local s=mainFrame.AbsoluteSize
 		return point.X>=p.X and point.X<=p.X+s.X and point.Y>=p.Y and point.Y<=p.Y+s.Y
@@ -5569,7 +5937,16 @@ return UI
 		for _,tool in pairs(tools) do tool.Enabled=nextMode=="create" end
 		applyTheme(nextMode=="load" and "load" or "create")
 		syncVisibility() renderTabs()
-		setStatus(nextMode=="create" and "Мастерская · R меняет режим инструмента · Ctrl+Z отменяет действие" or "Загрузи код → рассчитай план → проверь → строй")
+		setStatus(nextMode=="create" and "Мастерская · R меняет режим инструмента · Ctrl+Z отменяет действие" or nextMode=="extras" and "Приколы · выбери группу и открой мини-окно" or "Загрузи код → рассчитай план → проверь → строй")
+	end
+	StudioHooks.stageCompanion=function(code,id)
+		setMode("extras")
+		local previous=tabsData[activeTabIndex] local p=_G.buildOffset or Vector3.zero previous.placement={p.X,p.Y,p.Z}
+		local index
+		for i,tab in ipairs(tabsData) do if tab.id==id then index=i break end end
+		if not index then tabsData[#tabsData+1]={id=id,name="Двойник R6",content=code,placement={0,0,0}} index=#tabsData end
+		activeTabIndex=index cleanupVisuals(true) _G.buildOffset=Vector3.zero
+		setBuildContent(code) renderTabs() updateDefaultStats()
 	end
 	local function restore(direction)
 		if blocked() then return end
@@ -5591,6 +5968,7 @@ return UI
 	trackConn(View.homeBtn.MouseButton1Click:Connect(function() setMode("welcome") end))
 	trackConn(createModeBtn.MouseButton1Click:Connect(function() setMode("create") end))
 	trackConn(loadModeBtn.MouseButton1Click:Connect(function() setMode("load") end))
+	trackConn(View.extrasModeBtn.MouseButton1Click:Connect(function() setMode("extras") end))
 	for which,card in pairs(cards) do trackConn(card.MouseButton1Click:Connect(function() setMode(which) end)) end
 	trackConn(moreBtn.MouseButton1Click:Connect(function() moreOpen=not moreOpen syncVisibility() end))
 	trackConn(codeBtn.MouseButton1Click:Connect(function()
@@ -6114,6 +6492,7 @@ unloadScript = function()
 		local ok,err=pcall(fn)
 		if not ok then errors[#errors+1]=name..": "..tostring(err) end
 	end
+	step("Двойник",function() if StudioHooks.extras then StudioHooks.extras.close() end end)
 	step("Защита",function() if StudioHooks.guard then StudioHooks.guard.close() end end)
 	local sessions={} local seen={}
 	local function include(session)
@@ -6159,4 +6538,4 @@ unloadScript = function()
 end
 
 _G.AUTOBUILD_UNLOAD = unloadScript
-setStatus("ORBIT indexed-14: адресные проверки и полная выгрузка по ×")
+setStatus("ORBIT companion-15: Приколы / Unanchor / Двойник R6")

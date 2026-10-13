@@ -21,3 +21,5 @@ OrbitSessions.json
 AutobuildData.json.legacy-v5.backup
 OrbitRecovery_*.json.journal
 AutobuildPending.json.journal
+OrbitCompanion.json
+Orbit-companion-report.txt

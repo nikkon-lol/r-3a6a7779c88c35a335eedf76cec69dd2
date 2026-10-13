@@ -8,7 +8,7 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/nikkon-lol/r-3a6a7779
 
 Сохрани эту команду в исполнителе. Она скачивает `main.lua` из ветки `main` при каждом запуске. Для обновления меняется содержимое `main.lua`; ссылка сохраняется.
 
-Текущая версия: Autobuild Studio v5 / ORBIT, обновление indexed-14. Управление и возможности — [GUIDE.md](GUIDE.md).
+Текущая версия: Autobuild Studio v5 / ORBIT, обновление companion-15. Управление и возможности — [GUIDE.md](GUIDE.md).
 
 Файл `loader.lua` содержит ту же команду. Старый вариант с личным ключом больше не требуется. Случайное имя не ограничивает доступ: репозиторий виден в профиле владельца, а файлы доступны любому со ссылкой.
 
@@ -33,3 +33,14 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/nikkon-lol/r-3a6a7779
 ```lua
 loadstring(game:HttpGet("https://raw.githubusercontent.com/nikkon-lol/r-3a6a7779c88c35a335eedf76cec69dd2/refs/heads/main/unload.lua"))()
 ```
+
+
+«Приколы» → Unanchor → «Двойник R6»: мини-окно, шесть новых собственных блоков с цветами конечностей, повторение поз, отступ и сторона. Нужны R6 и настоящие Build/Paint/Shape. Перед закрытием основного окна нажми «Остановить / вернуть блоки». Подробности и ограничения — [GUIDE.md](GUIDE.md).
+
+После запуска двойника — десятисекундная проверка без команд:
+
+```lua
+loadstring(game:HttpGet("https://raw.githubusercontent.com/nikkon-lol/r-3a6a7779c88c35a335eedf76cec69dd2/refs/heads/main/companion-probe.lua"))()
+```
+
+Отчёт появится в F9, буфере обмена и `Orbit-companion-report.txt`. Во время проверки походи, попрыгай, повернись и поменяй отступ.
