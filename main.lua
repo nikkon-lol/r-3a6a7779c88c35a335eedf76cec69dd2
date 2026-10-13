@@ -44,6 +44,266 @@ local updatingEditor = false
 local rotationPivot = nil
 local editorDisplayText = nil
 local saveRevision = 0
+-- Full documents never depend on the visible TextBox page.
+StudioHooks.documents=(function()
+	local D={limit=12000,lines=160,cache={},written={},files={},serial=0,visualRevision=0}
+	local function notice(message) if StudioHooks.documentStatus then StudioHooks.documentStatus(message,true) end end
+	local function guid()
+		D.serial+=1
+		local ok,value=pcall(function() return HttpService:GenerateGUID(false) end)
+		return (ok and type(value)=="string" and value:gsub("[^%w_-]","") or tostring(os.time()).."_"..tostring(math.floor(os.clock()*1000))).."_"..D.serial
+	end
+	function D.id(tab)
+		if type(tab.id)~="string" or tab.id=="" then tab.id="build_"..guid() end
+		return tab.id
+	end
+	local function safe(file) return type(file)=="string" and file:match("^OrbitBuild_[%w_-]+%.txt$")~=nil end
+	function D.hydrate(tab)
+		if type(tab)~="table" then return nil end
+		if type(tab.content)=="string" then return tab.content end
+		if not safe(tab.contentFile) then return nil end
+		local ok,value=pcall(function() return readfile(tab.contentFile) end)
+		if ok and type(value)=="string" and (tab.bytes==nil or #value==tab.bytes) then tab.unavailable=nil D.written[tab.contentFile]=value return value end
+		local saved,backup=pcall(function() return readfile(tab.contentFile..".backup") end)
+		if saved and type(backup)=="string" and tab.bytes==#backup then tab.unavailable=nil tab.recoveredBackup=true return backup end
+		tab.unavailable=true return ""
+	end
+	function D.freezeLegacy(file,decoded)
+		if not writefile or not readfile or not isfile then return end
+		for _,tab in ipairs(decoded) do if type(tab)=="table" and type(tab.content)=="string" then
+			pcall(function() if not isfile(file..".legacy-v5.backup") then writefile(file..".legacy-v5.backup",readfile(file)) end end)
+			return
+		end end
+	end
+	function D.manifest(tabs)
+		local rows={} local owners={} local ids={}
+		for _,tab in ipairs(tabs) do
+			local id=D.id(tab)
+			if ids[id] then tab.id="build_"..guid() id=tab.id end ids[id]=true
+			local file=tab.contentFile
+			if not safe(file) or owners[file] then file=D.files[id] or "OrbitBuild_"..guid()..".txt" if owners[file] then file="OrbitBuild_"..guid()..".txt" end end
+			owners[file]=true
+			D.files[id]=file tab.contentFile=file
+			if not tab.unavailable and (tab.recoveredBackup or D.written[file]~=tab.content) then
+				if readfile and isfile and isfile(file) then
+					local old=readfile(file) if type(old)=="string" then writefile(file..(tab.recoveredBackup and ".damaged-backup" or ".backup"),old) end
+				end
+				writefile(file..".pending",tab.content) writefile(file,tab.content)
+				if readfile and readfile(file)~=tab.content then error("Не подтверждена запись постройки "..tab.name,0) end
+				D.written[file]=tab.content
+				tab.recoveredBackup=nil
+			end
+			rows[#rows+1]={id=id,name=tab.name,contentFile=file,bytes=tab.unavailable and tab.bytes or #tab.content,placement=tab.placement,rotationPivot=tab.rotationPivot,unavailable=tab.unavailable or nil}
+		end
+		return rows
+	end
+	local function index(tab,value)
+		local id=D.id(tab) local cached=D.cache[id]
+		if cached and cached.raw==value then return cached end
+		local pages={} local start=1
+		local sep=value:find("||",1,true) local newline=value:find("\n",1,true)
+		while start<=#value do
+			local last=math.min(#value,start+D.limit-1) local rows=0
+			while true do
+				local stop=sep and newline and math.min(sep,newline) or sep or newline
+				if not stop or stop>last then break end
+				rows+=1
+				if sep==stop then sep=value:find("||",stop+1,true) end
+				if newline==stop then newline=value:find("\n",stop+1,true) end
+				if rows>=D.lines then last=stop break end
+			end
+			-- Never split a UTF-8 character between pages.
+			while last<#value and value:byte(last+1)>=128 and value:byte(last+1)<192 do last-=1 end
+			pages[#pages+1]={first=start,last=last} start=last+1
+		end
+		if #pages==0 then pages={{first=1,last=0}} end
+		local count=0 for _ in value:gmatch("|[^|]+|") do count+=1 end
+		cached={raw=value,pages=pages,count=count,page=math.clamp(cached and cached.page or 1,1,#pages)}
+		D.cache[id]=cached return cached
+	end
+	function D.view(tab,value)
+		local cached=index(tab,value) local range=cached.pages[cached.page]
+		D.active=tab D.range={first=range.first,last=range.last,raw=value}
+		return value:sub(range.first,range.last):gsub("%|%|","|\n|")
+	end
+	function D.metrics()
+		local tab=tabsData[activeTabIndex] local c=index(tab,tab.content or "")
+		return c.count,c.page,#c.pages
+	end
+	function D.edit(display)
+		local tab=tabsData[activeTabIndex] local value=display:gsub("%|\r?\n%|","||")
+		local range=D.range
+		if tab==D.active and range and range.raw==tab.content then
+			value=range.raw:sub(1,range.first-1)..value..range.raw:sub(range.last+1)
+		end
+		tab.unavailable=nil return value
+	end
+	function D.page(delta)
+		if _G.autobuildRunning or busySaving then return end
+		local tab=tabsData[activeTabIndex] local c=index(tab,tab.content)
+		c.page=math.clamp(c.page+delta,1,#c.pages)
+		if StudioHooks.renderDocument then StudioHooks.renderDocument(D.view(tab,tab.content)) end
+	end
+	function D.runUI(action)
+		if unloaded then return false end
+		if busySaving then notice("Дождитесь сохранения") return false end
+		if _G.autobuildRunning then
+			local guard=StudioHooks.guard
+			if guard and guard.autoExecuting then D.pendingUI=action _G.stopautobuild=true notice("Приостанавливаю фоновую защиту для действия в интерфейсе")
+			else notice("Сначала поставь строительство на паузу") end
+			return false
+		end
+		local ok,err=pcall(action) if not ok then notice("Действие интерфейса: "..tostring(err)) end
+		return ok
+	end
+	function D.flushUI()
+		local action=D.pendingUI D.pendingUI=nil
+		if action and not unloaded then D.runUI(action) end
+	end
+	local registry=_G.AUTOBUILD_DOCUMENT_JOBS
+	if type(registry)~="table" or registry.job~=game.JobId then registry={job=game.JobId,jobs={},orphans={}} _G.AUTOBUILD_DOCUMENT_JOBS=registry end
+	D.jobs=registry.jobs D.orphans=registry.orphans
+	function D.pending(session)
+		for _,b in ipairs(session.blocks or {}) do
+			if b.creation or b.pendingResize and b.pendingResize.brick and b.pendingResize.brick.Parent or (b.pendingCollision or b.repairDeleteRequested) and b.placedBrick and b.placedBrick.Parent then return true end
+			for _,old in ipairs(b.retired or {}) do if (old.attempts or 1)>0 then return true end end
+			for _,h in ipairs(b.work and b.work.helpers or {}) do if h.creation or h.brick and h.brick.Parent then return true end end
+		end
+		for part,state in pairs(session.obstacleDeletes or {}) do if state.requested and part.Parent then return true end end
+		return false
+	end
+	function D.stash(session)
+		if not session or not session.buildId then return end
+		local old=D.jobs[session.buildId]
+		if old and old~=session and D.pending(old) then
+			local found=false for _,s in ipairs(D.orphans) do if s==old then found=true break end end
+			if not found then D.orphans[#D.orphans+1]=old end
+		end
+		D.jobs[session.buildId]=session
+	end
+	function D.find(id,text,offset)
+		local s=D.jobs[id]
+		if s and s.text==text and s.offset==offset then return s end
+		for _,old in ipairs(D.orphans) do if old.buildId==id and old.text==text and old.offset==offset then return old end end
+	end
+	function D.activate(tab,value)
+		local id=D.id(tab) D.stash(resumeSession)
+		resumeSession=D.find(id,value,_G.buildOffset or Vector3.zero)
+		local guard=StudioHooks.guard
+		if guard and guard.session~=resumeSession then guard.close() if resumeSession then guard.watch(resumeSession) end end
+		if tab.content~=value then tab.unavailable=nil end
+	end
+	function D.otherJobs(session)
+		local result={} local seen={}
+		for _,list in ipairs({D.jobs,D.orphans}) do for _,s in pairs(list) do if s~=session and not seen[s] and D.pending(s) then seen[s]=true result[#result+1]=s end end end
+		return result
+	end
+	function D.reservations(session)
+		local result={}
+		for _,s in ipairs(D.otherJobs(session)) do
+			local function add(box) if box then result[#result+1]={id="inactive:"..s.buildId..":"..#result,reservedTarget="inactive:"..s.buildId,pos=box.pos,size=box.size,color=Color3.new(1,1,1),material=Enum.Material.Plastic,collide=true,sprays={},eligible=false} end end
+			local function holder(h)
+				if h.creation then add(h.creation.initial) end
+				for _,old in ipairs(h.retired or {}) do add(old.initial) end
+				if h.brick and h.brick.Parent and (h.creation or h.temporary) then add({pos=h.brick.Position,size=h.brick.Size}) end
+			end
+			for _,b in ipairs(s.blocks) do
+				holder(b) for _,h in ipairs(b.work and b.work.helpers or {}) do holder(h) end
+				if b.pendingResize then add(b.pendingResize.step.before) add(b.pendingResize.step.after) end
+				if b.pendingCollision and b.placedBrick and b.placedBrick.Parent then add({pos=b.placedBrick.Position,size=b.placedBrick.Size}) end
+			end
+			for part,state in pairs(s.obstacleDeletes or {}) do if state.requested and part.Parent then add({pos=part.Position,size=part.Size}) end end
+		end
+		for _,row in ipairs(D.runtimeRows or {}) do
+			if row.key~=session.recoveryKey and row.pending and row.job==game.JobId then
+				local state=D.readRuntime(row.key,"pending")
+				if state and state.job==game.JobId and state.buildId==row.buildId then
+					local function add(packed)
+						local m=D.box(packed)
+						if m then result[#result+1]={id="disk-inactive:"..row.key..":"..#result,reservedTarget="inactive:"..row.buildId,pos=m.pos,size=m.size,color=Color3.new(1,1,1),material=Enum.Material.Plastic,collide=true,sprays={},eligible=false} end
+					end
+					local function holder(h)
+						if type(h)~="table" then return end
+						if type(h.creation)=="table" then add(h.creation.initial) end
+						for _,old in ipairs(h.retired or {}) do add(old.initial) end
+						if h.temporary then add(h.brick) end
+					end
+					for _,record in ipairs(state.records or {}) do
+						holder(record.holder) for _,h in ipairs(record.helpers or {}) do holder(h) end
+						if type(record.resize)=="table" then add(record.resize.before) add(record.resize.after) end
+						if record.collision then add(record.holder and record.holder.brick) end
+					end
+					for _,record in ipairs(state.obstacles or {}) do add(record) end
+				end
+			end
+		end
+		return result
+	end
+	function D.discard(tab)
+		local id=tab.id if not id then return end
+		local s=D.jobs[id]
+		if s and D.pending(s) then D.orphans[#D.orphans+1]=s end
+		if resumeSession==s then resumeSession=nil end
+		D.jobs[id]=nil D.cache[id]=nil
+	end
+	function D.pendingPart(session,part)
+		for _,s in ipairs(D.otherJobs(session)) do
+			if s.helpers and s.helpers[part] then return true end
+			local state=s.obstacleDeletes and s.obstacleDeletes[part] if state and state.requested then return true end
+			for _,b in ipairs(s.blocks) do if b.placedBrick==part and (b.pendingResize or b.pendingCollision or b.repairDeleteRequested) then return true end end
+		end
+		return false
+	end
+	D.runtimeRows={} D.runtimeCache={}
+	if readfile and isfile then pcall(function()
+		if isfile("OrbitSessions.json") then
+			local stored=HttpService:JSONDecode(readfile("OrbitSessions.json"))
+			if type(stored)=="table" then for _,row in ipairs(stored) do if type(row)=="table" and type(row.key)=="string" and row.key:match("^[%w_-]+$") and type(row.buildId)=="string" then D.runtimeRows[#D.runtimeRows+1]=row end end end
+		end
+	end) end
+	function D.box(packed)
+		if type(packed)~="table" or type(packed.pos)~="table" or type(packed.size)~="table" or #packed.pos~=3 or #packed.size~=3 then return end
+		for _,a in ipairs({packed.pos,packed.size}) do for _,n in ipairs(a) do if type(n)~="number" or n~=n or math.abs(n)>1000000 then return end end end
+		return {pos=Vector3.new(unpack(packed.pos)),size=Vector3.new(unpack(packed.size))}
+	end
+	function D.readRuntime(key,kind)
+		local file="OrbitRecovery_"..key.."."..kind..".json"
+		if D.runtimeCache[file] then return D.runtimeCache[file] end
+		local ok,value=pcall(function() return HttpService:JSONDecode(readfile(file)) end)
+		if ok and type(value)=="table" then D.runtimeCache[file]=value return value end
+	end
+	function D.paths(session,create)
+		if not session.recoveryKey then
+			for _,row in ipairs(D.runtimeRows) do
+				if row.job==game.JobId and row.buildId==session.buildId and row.bytes==#session.text and type(row.offset)=="table" and row.offset[1]==session.offset.X and row.offset[2]==session.offset.Y and row.offset[3]==session.offset.Z then
+					local stored=D.readRuntime(row.key,"manifest")
+					if stored and stored.text==session.text then session.recoveryKey=row.key break end
+				end
+			end
+		end
+		if not session.recoveryKey and create then
+			session.recoveryKey=guid()
+			D.runtimeRows[#D.runtimeRows+1]={key=session.recoveryKey,job=game.JobId,buildId=session.buildId,bytes=#session.text,offset={session.offset.X,session.offset.Y,session.offset.Z},pending=true}
+		end
+		if not session.recoveryKey then return "AutobuildRecovery.json","AutobuildPending.json" end
+		return "OrbitRecovery_"..session.recoveryKey..".manifest.json","OrbitRecovery_"..session.recoveryKey..".pending.json"
+	end
+	function D.record(session)
+		D.stash(session)
+		local changed=false
+		for _,row in ipairs(D.runtimeRows) do if row.key==session.recoveryKey then
+			local pending=D.pending(session) if row.pending~=pending then row.pending=pending changed=true end
+		end end
+		if changed or D.savedRuntimeCount~=#D.runtimeRows then
+			if writefile then pcall(function() writefile("OrbitSessions.json",HttpService:JSONEncode(D.runtimeRows)) end) end
+			D.savedRuntimeCount=#D.runtimeRows
+		end
+		if session.recoveryKey then D.runtimeCache["OrbitRecovery_"..session.recoveryKey..".pending.json"]=nil D.runtimeCache["OrbitRecovery_"..session.recoveryKey..".manifest.json"]=nil end
+	end
+	if resumeSession then D.stash(resumeSession) end
+	return D
+end)()
+
 
 
 local loadWarning=nil
@@ -53,10 +313,12 @@ if isfile and readfile then
 		return HttpService:JSONDecode(readfile(SAVE_FILE))
 	end)
 	if ok and decoded~=nil and type(decoded)=="table" then
+		StudioHooks.documents.freezeLegacy(SAVE_FILE,decoded)
 		local clean, rejected={},0
 		for _, tab in ipairs(decoded) do
-			if type(tab)=="table" and type(tab.content)=="string" then
-				clean[#clean+1]={name=type(tab.name)=="string" and tab.name or "Build",content=tab.content,id=type(tab.id)=="string" and tab.id or nil,placement=type(tab.placement)=="table" and tab.placement or nil,rotationPivot=type(tab.rotationPivot)=="table" and tab.rotationPivot or nil}
+			local content=StudioHooks.documents.hydrate(tab)
+			if content~=nil then
+				clean[#clean+1]={name=type(tab.name)=="string" and tab.name or "Build",content=content,contentFile=tab.contentFile,bytes=tab.bytes,unavailable=tab.unavailable,recoveredBackup=tab.recoveredBackup,id=type(tab.id)=="string" and tab.id or nil,placement=type(tab.placement)=="table" and tab.placement or nil,rotationPivot=type(tab.rotationPivot)=="table" and tab.rotationPivot or nil}
 			else rejected=rejected+1 end
 		end
 		if #clean>0 then tabsData=clean end
@@ -72,7 +334,7 @@ end
 local function saveData()
 	if StudioHooks.save then StudioHooks.save() end
 	if not writefile then storageError="Нет writefile; вкладки доступны только в этом запуске" return end
-	local ok,err=pcall(function() local payload=HttpService:JSONEncode(tabsData)
+	local ok,err=pcall(function() local payload=HttpService:JSONEncode(StudioHooks.documents.manifest(tabsData))
 		writefile(SAVE_FILE..".pending",payload)
 		if readfile and isfile and isfile(SAVE_FILE) then
 			local old=readfile(SAVE_FILE)
@@ -358,15 +620,21 @@ local textBox = create("TextBox", {
 })
 
 local function setEditorDisplay(value)
-	updatingEditor = true
-	editorDisplayText = value
-	textBox.Text = value
-	if StudioHooks.editor then StudioHooks.editor(value) end
-	updatingEditor = false
+	updatingEditor=true
+	local ok,err=pcall(function()
+		textBox.Text=value editorDisplayText=value
+		if StudioHooks.editor then StudioHooks.editor(value) end
+	end)
+	updatingEditor=false
+	if StudioHooks.documents then StudioHooks.documents.renderFailed=not ok end
+	pcall(function() textBox.TextEditable=ok and not _G.autobuildRunning and not busySaving end)
+	if not ok and StudioHooks.documentStatus then StudioHooks.documentStatus("Отображение страницы: "..tostring(err),true) end
 end
+StudioHooks.renderDocument=setEditorDisplay
 
 local function setBuildContent(value, keepRotationPivot)
 	local tab=tabsData[activeTabIndex]
+	if StudioHooks.documents then StudioHooks.documents.activate(tab,value) end
 	if not keepRotationPivot then
 		rotationPivot=tab.content==value and tab.rotationPivot or nil
 		if type(rotationPivot)~="table" or type(rotationPivot.X)~="number" or type(rotationPivot.Z)~="number" then rotationPivot=nil end
@@ -377,8 +645,9 @@ local function setBuildContent(value, keepRotationPivot)
 	tabsData[activeTabIndex].content = value
 	if StudioHooks.content then StudioHooks.content(value) end
 	invalidatePreparedPlan()
-	local displayValue=value:gsub("%|%|","|\n|")
+	local displayValue=StudioHooks.documents and StudioHooks.documents.view(tab,value) or value:gsub("%|%|","|\n|")
 	setEditorDisplay(displayValue)
+	if tab.unavailable and StudioHooks.documentStatus then StudioHooks.documentStatus("Файл постройки недоступен: "..tostring(tab.contentFile)..". Ссылка и резервные файлы сохранены.",true) end
 	saveData()
 end
 
@@ -480,6 +749,7 @@ local function setStatus(message, failure)
 	if StudioHooks.status then StudioHooks.status() end
 	if failure then warn("AUTOBUILD: "..message) else print("AUTOBUILD: "..message) end
 end
+StudioHooks.documentStatus=setStatus
 local function copyText(text)
 	local writer=setclipboard or (syn and syn.set_clipboard) or (Clipboard and Clipboard.set)
 	if not writer then return false end
@@ -510,12 +780,12 @@ end
 local function updateDefaultStats()
 	local text = _G.fullBuildString or textBox.Text
 	local blockCount = 0
-	for _ in text:gmatch("|[^|]+|") do blockCount = blockCount + 1 end
+	if StudioHooks.documents then blockCount=StudioHooks.documents.metrics() else for _ in text:gmatch("|[^|]+|") do blockCount=blockCount+1 end end
 	statDisplay.Text = "Blocks: " .. blockCount .. "  |  Chars: " .. #text
 end
 
 btnLog.MouseButton1Click:Connect(function()
-	local text="Autobuild Studio v5 / ORBIT · guard-10\n"..table.concat(diagnosticLog,"\n")
+	local text="Autobuild Studio v5 / ORBIT · documents-11\n"..table.concat(diagnosticLog,"\n")
 	if storageError then text=text.."\nStorage: "..storageError end
 	if copyText(text) then setStatus("Диагностика скопирована") else setStatus("Буфер обмена недоступен",true) end
 end)
@@ -561,6 +831,7 @@ local function renderTabs()
 		})
 
 		tBtn.MouseButton1Click:Connect(function()
+	local action=function()
 			if _G.autobuildRunning or busySaving then return end
 	local previous=tabsData[activeTabIndex] local p=_G.buildOffset or Vector3.zero
 			previous.placement={p.X,p.Y,p.Z}
@@ -569,6 +840,8 @@ local function renderTabs()
 			if StudioHooks.hidePreview then StudioHooks.hidePreview() end
 			setBuildContent(tab.content)
 			renderTabs()
+	end
+	if StudioHooks.documents then StudioHooks.documents.runUI(action) else action() end
 		end)
 
 		tBtn.MouseButton2Click:Connect(function()
@@ -582,7 +855,9 @@ local function renderTabs()
 			end)
 		end)
 		delBtn.MouseButton1Click:Connect(function()
+	local action=function()
 			if _G.autobuildRunning or busySaving then return end
+	if StudioHooks.documents then StudioHooks.documents.discard(tab) end
 	if #tabsData <= 1 then
 				tabsData[1] = {name = "Build 1", content = ""}
 				activeTabIndex = 1
@@ -596,6 +871,8 @@ local function renderTabs()
 			setBuildContent(tabsData[activeTabIndex].content)
 			saveData()
 			renderTabs()
+	end
+	if StudioHooks.documents then StudioHooks.documents.runUI(action) else action() end
 		end)
 
 		table.insert(tabElements, tFrame)
@@ -604,6 +881,7 @@ local function renderTabs()
 end
 
 addTabBtn.MouseButton1Click:Connect(function()
+	local action=function()
 	if _G.autobuildRunning or busySaving then return end
 	table.insert(tabsData, {name = "Build " .. (#tabsData + 1), content = ""})
 	activeTabIndex = #tabsData
@@ -612,23 +890,27 @@ addTabBtn.MouseButton1Click:Connect(function()
 	setBuildContent("")
 	saveData()
 	renderTabs()
+	end
+	if StudioHooks.documents then StudioHooks.documents.runUI(action) else action() end
 end)
 
 textBox:GetPropertyChangedSignal("Text"):Connect(function()
 	if updatingEditor or textBox.Text == editorDisplayText then return end
-	if _G.autobuildRunning or busySaving then setEditorDisplay(tabsData[activeTabIndex].content) return end
+	if _G.autobuildRunning or busySaving then setEditorDisplay(StudioHooks.documents.view(tabsData[activeTabIndex],tabsData[activeTabIndex].content)) return end
+	local value=StudioHooks.documents.edit(textBox.Text)
 	editorDisplayText = nil
 	rotationPivot = nil
 	tabsData[activeTabIndex].rotationPivot=nil
-	tabsData[activeTabIndex].content = textBox.Text
-	if StudioHooks.content then StudioHooks.content(textBox.Text) end
-	_G.fullBuildString = textBox.Text
+	tabsData[activeTabIndex].content = value
+	if StudioHooks.content then StudioHooks.content(value) end
+	_G.fullBuildString = value
+	if StudioHooks.hidePreview then StudioHooks.hidePreview() end
 	invalidatePreparedPlan()
 	saveRevision = saveRevision + 1
 	local revision = saveRevision
 	task.delay(.4, function() if not unloaded and revision == saveRevision then saveData() end end)
 
-	if StudioHooks.editor then StudioHooks.editor(textBox.Text) end
+	setEditorDisplay(StudioHooks.documents.view(tabsData[activeTabIndex],value))
 
 	if not _G.autobuildRunning then updateDefaultStats() end
 end)
@@ -764,6 +1046,7 @@ local originalCenterPos = Vector3.new()
 _G.buildOffset = Vector3.zero
 
 local function cleanupVisuals(preserveOffset)
+	if StudioHooks.documents then StudioHooks.documents.visualRevision+=1 end
 	if visualFolder then visualFolder:Destroy() visualFolder = nil end
 	if handles then handles:Destroy() handles = nil end
 	centerPart = nil
@@ -786,6 +1069,8 @@ local function showVisuals()
 	local savedOffset = snapBuildOffset(_G.buildOffset or Vector3.zero)
 	cleanupVisuals(true)
 	visualFolder = create("Folder", {Name = "BuildVisuals", Parent = workspace})
+	local previewFolder=visualFolder
+	local previewRevision=StudioHooks.documents and StudioHooks.documents.visualRevision
 
 	local minB = Vector3.new(math.huge, math.huge, math.huge)
 	local maxB = Vector3.new(-math.huge, -math.huge, -math.huge)
@@ -807,6 +1092,8 @@ local function showVisuals()
 	})
 
 	for i, b in ipairs(blocks) do
+		if i%128==0 then task.wait() end
+		if unloaded or visualFolder~=previewFolder or StudioHooks.documents and previewRevision~=StudioHooks.documents.visualRevision then return end
 		if resumeSession and resumeSession.text == buildString and resumeSession.offset == savedOffset and resumeSession.done[i] and resumeSession.blocks[i].placedBrick and resumeSession.blocks[i].placedBrick.Parent then continue end
 		create("Part", {
 			Name = "Visual_" .. i,
@@ -843,7 +1130,7 @@ local function showVisuals()
 	end)
 
 	handles.MouseDrag:Connect(function(face, distance)
-		if not isDragging then return end
+		if not isDragging or not centerPart or visualFolder~=previewFolder or StudioHooks.documents and previewRevision~=StudioHooks.documents.visualRevision then return end
 		local direction = Vector3.FromNormalId(face)
 		local snappedDistance = math.round(distance / CONFIG.GRID_STEP) * CONFIG.GRID_STEP
 		local offset = direction * snappedDistance
@@ -868,6 +1155,7 @@ local function showVisuals()
 	_G.buildOffset = savedOffset
 	btnImport.Text = "Скрыть preview"
 	if StudioHooks.preview then StudioHooks.preview() end
+	return true
 end
 
 btnImport.MouseButton1Click:Connect(function()
@@ -880,9 +1168,11 @@ btnImport.MouseButton1Click:Connect(function()
 end)
 
 btnToMe.MouseButton1Click:Connect(function()
+	local action=function()
 	if StudioHooks.beforeTransform then local ok,message=StudioHooks.beforeTransform() if not ok then setStatus(message,true) return end end
 	if _G.autobuildRunning or busySaving then return end
-	if not visualsShowing or not centerPart or not visualFolder then return end
+	if not visualsShowing or not centerPart or not visualFolder then if not showVisuals() then return end end
+	if not centerPart or not visualFolder then return end
 	local char = LocalPlayer.Character
 	local hrp = char and char:FindFirstChild("HumanoidRootPart")
 	if not hrp then return end
@@ -900,19 +1190,25 @@ btnToMe.MouseButton1Click:Connect(function()
 	tabsData[activeTabIndex].placement={_G.buildOffset.X,_G.buildOffset.Y,_G.buildOffset.Z}
 	saveData()
 	invalidatePreparedPlan()
+	end
+	if StudioHooks.documents then StudioHooks.documents.runUI(action) else action() end
 end)
 
 btnSnap.MouseButton1Click:Connect(function()
+	local action=function()
 	if StudioHooks.beforeTransform then local ok,message=StudioHooks.beforeTransform() if not ok then setStatus(message,true) return end end
 	if _G.autobuildRunning or busySaving then return end
 	_G.buildOffset = snapBuildOffset(_G.buildOffset or Vector3.zero)
 	showVisuals()
+	end
+	if StudioHooks.documents then StudioHooks.documents.runUI(action) else action() end
 end)
 
 -- ============================================================================
 -- БРОНЕБОЙНАЯ МАТЕМАТИКА ПОВОРОТА ПО ВОКСЕЛЬНОЙ СЕТКЕ
 -- ============================================================================
 local function rotateBuild(angle)
+	if _G.autobuildRunning and StudioHooks.documents then StudioHooks.documents.runUI(function() rotateBuild(angle) end) return end
 	local buildString = (_G.fullBuildString and _G.fullBuildString ~= "") and _G.fullBuildString or textBox.Text
 	if buildString == "" or _G.autobuildRunning or busySaving then return end
 	if StudioHooks.beforeTransform then local ok,message=StudioHooks.beforeTransform() if not ok then setStatus(message,true) return end end
@@ -1044,6 +1340,7 @@ btnRot180.MouseButton1Click:Connect(function() rotateBuild(180) end)
 btnRotNeg90.MouseButton1Click:Connect(function() rotateBuild(-90) end)
 
 btnPaste.MouseButton1Click:Connect(function()
+	local action=function()
 	if _G.autobuildRunning or busySaving then return end
 	local reader=getclipboard or (syn and syn.get_clipboard) or (Clipboard and Clipboard.get)
 	local ok,value=false,nil
@@ -1052,6 +1349,8 @@ btnPaste.MouseButton1Click:Connect(function()
 	cleanupVisuals(false) setBuildContent(value) updateDefaultStats()
 	if StudioHooks.controls then StudioHooks.controls() end
 	setStatus("Код вставлен")
+	end
+	if StudioHooks.documents then StudioHooks.documents.runUI(action) else action() end
 end)
 btnCopy.MouseButton1Click:Connect(function()
 	local ok=exportToClipboard(_G.fullBuildString or textBox.Text)
@@ -1059,6 +1358,7 @@ btnCopy.MouseButton1Click:Connect(function()
 end)
 
 btnClear.MouseButton1Click:Connect(function()
+	local action=function()
 	if _G.autobuildRunning or busySaving then return end
 	setBuildContent("")
 	_G.buildChunks = nil
@@ -1067,6 +1367,8 @@ btnClear.MouseButton1Click:Connect(function()
 	btnNextChunk.Visible = false
 	cleanupVisuals(false)
 	updateDefaultStats()
+	end
+	if StudioHooks.documents then StudioHooks.documents.runUI(action) else action() end
 end)
 
 local selectedOwners = {[LocalPlayer.Name] = true}
@@ -2191,7 +2493,7 @@ local function snapshotWorld(session,geometryOnly)
 			local id=session.ids[brick]
 			if not id then session.nextWorld=session.nextWorld+1 id="w:"..session.nextWorld session.ids[brick]=id end
 			local opaque=not geometryOnly and (brick.Transparency<.001 or (brick.Material==Enum.Material.Glass and math.abs(brick.Transparency-.5)<.001))
-			local eligible=not geometryOnly and own and brick:IsDescendantOf(own) and identity and brick.Anchored and opaque and brick:IsA("Part") and brick.Shape==Enum.PartType.Block and SymbolToMaterial[MaterialSymbols[brick.Material]]~=nil
+			local eligible=not geometryOnly and (not StudioHooks.documents or not StudioHooks.documents.pendingPart(session,brick)) and own and brick:IsDescendantOf(own) and identity and brick.Anchored and opaque and brick:IsA("Part") and brick.Shape==Enum.PartType.Block and SymbolToMaterial[MaterialSymbols[brick.Material]]~=nil
 			local model={id=id,pos=brick.Position,size=worldSize,color=brick.Color,material=brick.Material,collide=brick.CanCollide,sprays=geometryOnly and {} or readSprays(brick),instance=brick,external=true,eligible=eligible==true and not session.helpers[brick] and not unfinished[brick]}
 			result[#result+1]=model
 			if model.eligible and not session.helpers[brick] then sources[#sources+1]=model end
@@ -2209,6 +2511,11 @@ local function snapshotWorld(session,geometryOnly)
 		end
 		reserve(data,"")
 		for n,h in ipairs(data.work and data.work.helpers or {}) do reserve(h,":"..n) end
+	end
+	if StudioHooks.documents then
+		local masks=StudioHooks.documents.reservations(session)
+		for _,mask in ipairs(masks) do result[#result+1]=mask end
+		for n=#sources,1,-1 do for _,mask in ipairs(masks) do if Planner.intersects(sources[n],mask) then sources[n].eligible=false table.remove(sources,n) break end end end
 	end
 	return result,sources
 end
@@ -2426,7 +2733,7 @@ function PlanLibrary.select(file)
 	if _G.autobuildRunning or _G.autobuildPreparing then return false,"Останови строительство перед сменой плана" end
 	if file==PlanLibrary.selection() then return true end
 	if file~="auto" and not readStored(file) then return false,"Файл плана не читается" end
-	if resumeSession then
+	if resumeSession and (not resumeSession.buildId or resumeSession.buildId==PlanLibrary.id()) then
 		for _,b in ipairs(resumeSession.blocks or {}) do
 			if b.creation or b.pendingResize or b.pendingCollision then return false,"Сначала продолжи и подтверди отправленные команды" end
 			for _,h in ipairs(b.work and b.work.helpers or {}) do if h.creation or h.brick and h.brick.Parent then return false,"Сначала заверши текущие вспомогательные блоки" end end
@@ -2593,6 +2900,8 @@ function PlanLibrary.restorePlacement()
 	local p=tab.rotationPivot
 	rotationPivot=type(p)=="table" and type(p.X)=="number" and type(p.Z)=="number" and p.X==p.X and p.Z==p.Z and math.abs(p.X)<=1000000 and math.abs(p.Z)<=1000000 and p or nil
 end
+local restorePlacement=PlanLibrary.restorePlacement
+PlanLibrary.restorePlacement=function() restorePlacement() if StudioHooks.documents then StudioHooks.documents.activate(tabsData[activeTabIndex],tabsData[activeTabIndex].content) end end
 StudioHooks.restorePlacement=PlanLibrary.restorePlacement
 PlanLibrary.restorePlacement()
 local legacyChoices=choices
@@ -3006,6 +3315,8 @@ local createOnce=(function()
 		return value
 	end
 	function C.capture(session)
+		local manifestFile,stateFile=manifestFile,stateFile
+		if StudioHooks.documents then manifestFile,stateFile=StudioHooks.documents.paths(session,true) end
 		_G.AUTOBUILD_RESUME={version=2,job=game.JobId,session=session}
 		if not writefile then return end
 		local records={}
@@ -3022,14 +3333,17 @@ local createOnce=(function()
 			end
 		end
 		local ok,err=pcall(function()
-			if not lastManifest or lastManifest.id~=session.buildId or lastManifest.text~=session.text or lastManifest.offset~=session.offset then
-				writefile(manifestFile,HttpService:JSONEncode({version=1,job=game.JobId,buildId=session.buildId,text=session.text,offset=planVector(session.offset)})) lastManifest={id=session.buildId,text=session.text,offset=session.offset}
+			if not lastManifest or lastManifest.file~=manifestFile or lastManifest.id~=session.buildId or lastManifest.text~=session.text or lastManifest.offset~=session.offset then
+				writefile(manifestFile,HttpService:JSONEncode({version=1,job=game.JobId,buildId=session.buildId,text=session.text,offset=planVector(session.offset)})) lastManifest={file=manifestFile,id=session.buildId,text=session.text,offset=session.offset}
 			end
 			writefile(stateFile,HttpService:JSONEncode({version=1,job=game.JobId,buildId=session.buildId,records=records,controls=controls,obstacles=StudioHooks.guard and StudioHooks.guard.pack(session) or nil}))
 		end)
+		if StudioHooks.documents then StudioHooks.documents.record(session) end
 		if not ok then setStatus("Состояние в памяти; контрольная запись не удалась: "..tostring(err),true) end
 	end
 	function C.restore(session)
+		local manifestFile,stateFile=manifestFile,stateFile
+		if StudioHooks.documents then manifestFile,stateFile=StudioHooks.documents.paths(session,false) end
 		if not readfile or not isfile then return end
 		pcall(function()
 			if not isfile(manifestFile) or not isfile(stateFile) then return end
@@ -3597,7 +3911,7 @@ StudioHooks.guard=(function()
 		return false
 	end
 	function G.protected(session,brick)
-		if session.helpers[brick] then return true end
+		if session.helpers[brick] or StudioHooks.documents and StudioHooks.documents.pendingPart(session,brick) then return true end
 		local id=session.ids[brick] local index=type(id)=="string" and tonumber(id:match("^t:(%d+)$"))
 		local data=index and session.blocks[index]
 		return data and (data.placedBrick==brick or data.brick==brick) or false
@@ -3795,6 +4109,7 @@ StudioHooks.guard=(function()
 				for _,old in ipairs(holder.retired or {}) do if old.initial then reserved[#reserved+1]=old.initial end end
 			end
 			for _,data in ipairs(session.blocks) do include(data) for _,h in ipairs(data.work and data.work.helpers or {}) do include(h) end end
+			if StudioHooks.documents then for _,m in ipairs(StudioHooks.documents.reservations(session)) do reserved[#reserved+1]=m end end
 			G.worldScan={parts=root:GetDescendants(),cursor=1,reserved=Planner.spatial(reserved)}
 		end
 		local scan=G.worldScan
@@ -3824,17 +4139,17 @@ StudioHooks.guard=(function()
 			if G.enabled and not d.skipped and (d.guardRetryAt or 0)<=os.clock() then
 				if not getPlayerBricksFolder() or not LocalPlayer.Character or not findTool("Build") then return end
 				G.nextRun=os.clock()+2
-				G.autoClearOnly=not G.enabled
+				G.autoClearOnly=not G.enabled G.autoCall=true
 				if StudioHooks.resumeRecovery then StudioHooks.resumeRecovery() end
-				G.autoClearOnly=nil
+				G.autoClearOnly=nil G.autoCall=nil
 				return
 			end
 		end
 		if G.clear and next(G.obstacles) and (G.clearRetryAt or 0)<=os.clock() then
 			if not findTool("Delete") then return end
-			G.nextRun=os.clock()+2 G.autoClearOnly=not G.enabled
+			G.nextRun=os.clock()+2 G.autoClearOnly=not G.enabled G.autoCall=true
 			if StudioHooks.resumeRecovery then StudioHooks.resumeRecovery() end
-			G.autoClearOnly=nil
+			G.autoClearOnly=nil G.autoCall=nil
 		end
 	end
 	local elapsed=0
@@ -3848,6 +4163,8 @@ end)()
 
 local function runBuilderEngine(buildString,offset,prepareOnly)
 	if not resumeSession or resumeSession.buildId~=PlanLibrary.id() or resumeSession.text~=buildString or resumeSession.offset~=offset then
+		if StudioHooks.documents then StudioHooks.documents.stash(resumeSession) resumeSession=nil
+		else
 		if resumeSession then
 			for helper in pairs(resumeSession.helpers or {}) do if helper.Parent then return false,"Остались временные блоки предыдущей стройки. Продолжите её для удаления." end end
 			for _,old in ipairs(resumeSession.blocks) do
@@ -3856,6 +4173,7 @@ local function runBuilderEngine(buildString,offset,prepareOnly)
 			end
 			for _,old in ipairs(resumeSession.blocks) do if old.creation then old.creation.connection:Disconnect() end end
 		end
+		end
 		local blocks,invalid=parseBlocks(buildString,offset)
 		if invalid>0 or #blocks==0 then return false,"Некорректные данные постройки" end
 		resumeSession={buildId=PlanLibrary.id(),text=buildString,offset=offset,blocks=blocks,done={},models={},ids={},instances={},nextWorld=0,helpers={},actual={creates=0,shapes=0,deletes=0}}
@@ -3863,6 +4181,7 @@ local function runBuilderEngine(buildString,offset,prepareOnly)
 		StudioHooks.recovery.restore(resumeSession)
 	end
 	local session=resumeSession
+	if StudioHooks.documents then StudioHooks.documents.stash(session) end
 	session.activeIndex=nil
 	if session.plan and session.plan.plannerVersion~=Planner.version then session.plan=nil session.planByIndex=nil session.previewInvalid=true end
 	session.actionRevision=(session.actionRevision or 0)+1
@@ -3987,6 +4306,7 @@ local function launchAction(forcePreparation)
 	if busySaving then setStatus("Дождитесь сохранения") return end
 	if isBuilding then _G.stopautobuild=true btnStart.Text="ОСТАНОВКА…" setStatus("Останавливаю; отправленный запрос может завершиться") return end
 	if resumeSession then resumeSession.guardClearOnly=StudioHooks.guard and StudioHooks.guard.autoClearOnly==true or false end
+	local automatic=StudioHooks.guard and StudioHooks.guard.autoCall==true
 	local text=_G.fullBuildString or textBox.Text
 	local blocks,invalid=parseBlocks(text,Vector3.zero)
 	if #blocks==0 or invalid>0 then setStatus("Некорректная постройка",true) return end
@@ -3996,18 +4316,21 @@ local function launchAction(forcePreparation)
 	if forcePreparation and prepared then resumeSession.plan=nil end
 	_G.buildOffset=offset _G.stopautobuild=false _G.autobuildRunning=true
 	_G.autobuildTotal=#blocks _G.autobuildPlaced=0
+	if StudioHooks.guard then StudioHooks.guard.autoExecuting=automatic end
 	isBuilding=true textBox.TextEditable=false btnStart.Text="ГОТОВЛЮ ПЛАН" btnStart.TextColor3=C_RED
 	if handles then handles:Destroy() handles=nil end
 	task.spawn(function()
 		local ok,finished,message=pcall(runBuilderEngine,text,offset,prepareOnly)
 		if resumeSession then resumeSession.activeIndex=nil end
-		unlockPosition() stopToolForcing() disableNoclip() isBuilding=false
+		pcall(unlockPosition) pcall(stopToolForcing) pcall(disableNoclip) isBuilding=false
+		if StudioHooks.guard then StudioHooks.guard.autoExecuting=false end
 		if unloaded then return end
 		_G.autobuildRunning=false textBox.TextEditable=true btnStart.TextColor3=C_WHITE
 		btnStart.Text=ok and finished and (prepareOnly and "СТРОИТЬ ПО ПЛАНУ" or "СТРОИТЬ") or "ПРОДОЛЖИТЬ"
 		if ok and finished and not prepareOnly then cleanupVisuals(true) end
 		setStatus(ok and message or tostring(finished),not ok or not finished and not _G.stopautobuild)
 		statDisplay.Text=prepareOnly and ok and finished and ("План · действий ~"..resumeSession.plan.operations) or string.format("Готово: %d/%d",_G.autobuildPlaced or 0,#blocks)
+		if StudioHooks.documents then StudioHooks.documents.flushUI() end
 	end)
 end
 StudioHooks.resumeRecovery=function() launchAction(false) end
@@ -4169,6 +4492,7 @@ return H
 	local mouse=LocalPlayer:GetMouse()
 	local loadedContent=nil
 	local lastContentTab=nil
+	local loadedTabId=nil
 	local mutedHistory=false
 	local historyFile="AutobuildStudioHistory-v4.json"
 	local function snapshot()
@@ -4384,6 +4708,11 @@ UI.planBtn=button(bottom,"План: Авто",UDim2.new(1,-286,0,0),UDim2.fromOf
 UI.moreBtn=button(editorFrame,"···",UDim2.new(1,-46,0,6),UDim2.fromOffset(32,28),"deep")
 recordBadge.Position=UDim2.new(1,-174,0,10)
 UI.primary={btnStart,btnPaste,btnCopy,btnImport,btnToMe}
+UI.pagePrevious=button(editorFrame,"‹",UDim2.fromOffset(16,36),UDim2.fromOffset(28,26),"deep") UI.pagePrevious.Name="DocumentPagePrevious"
+UI.pageNext=button(editorFrame,"›",UDim2.fromOffset(50,36),UDim2.fromOffset(28,26),"deep") UI.pageNext.Name="DocumentPageNext"
+UI.pageInfo=label(editorFrame,"",UDim2.fromOffset(88,39),UDim2.new(1,-104,0,20),10,"muted") UI.pageInfo.Name="DocumentPageInfo"
+UI.pagePrevious.MouseButton1Click:Connect(function() if StudioHooks.documents then StudioHooks.documents.page(-1) end end)
+UI.pageNext.MouseButton1Click:Connect(function() if StudioHooks.documents then StudioHooks.documents.page(1) end end)
 local loadInspector=create("Frame",{Parent=sideContainer,Size=UDim2.new(1,0,0,470),BackgroundTransparency=1})
 label(loadInspector,"ПОСТРОЙКА",UDim2.fromOffset(16,14),UDim2.new(1,-32,0,22),10,"muted","medium")
 label(loadInspector,"Текущий / последний проблемный",UDim2.fromOffset(16,42),UDim2.new(1,-32,0,25),11,"muted","medium")
@@ -4591,11 +4920,17 @@ function UI.editor(text)
 	local numbers={} for i=1,math.min(lines,4000) do numbers[i]=tostring(i) end
 	lineNumbers.Text=table.concat(numbers,"\n")
 	local height=math.max(textScroll.AbsoluteSize.Y,lines*16+24)
-	local width=math.max(textScroll.AbsoluteSize.X,math.min(12000,longest*7+66))
+	local width=math.max(textScroll.AbsoluteSize.X,longest*7+66)
 	textBox.Size=UDim2.fromOffset(width-40,height) lineNumbers.Size=UDim2.fromOffset(28,height) textScroll.CanvasSize=UDim2.fromOffset(width,height)
 	emptyState.Visible=text==""
-	local count=0 for _ in (_G.fullBuildString or text):gmatch("|[^|]+|") do count+=1 end
+	local count,page,pages=0,1,1
+	if StudioHooks.documents then count,page,pages=StudioHooks.documents.metrics()
+	else for _ in (_G.fullBuildString or text):gmatch("|[^|]+|") do count+=1 end end
 	recordBadge.Text=count.." деталей"
+	UI.pagePrevious.Visible=pages>1 UI.pageNext.Visible=pages>1 UI.pageInfo.Visible=pages>1
+	UI.pageInfo.Text="Страница "..page.."/"..pages.." · правка этой страницы"
+	textScroll.Position=UDim2.fromOffset(10,pages>1 and 72 or 42)
+	textScroll.Size=UDim2.new(1,-20,1,pages>1 and -86 or -56)
 end
 function UI.controls()
 	UI.planBtn.Text="План: "..(PlanLibrary.selection()=="auto" and "Авто" or PlanLibrary.selection())
@@ -4854,32 +5189,42 @@ return UI
 		refreshSelection()
 	end
 	local function commit()
+		if sceneLoading or sceneInvalid or pendingContent~=nil or lastContentTab~=activeTabIndex then return false end
 		local code=codeFor(collect(false))
 		updatingScene=true
 		_G.buildOffset=Vector3.zero
 		setBuildContent(code)
 		updatingScene=false
-		loadedContent=code lastContentTab=activeTabIndex loadedOffset=Vector3.zero sceneInvalid=false
+		loadedContent=code lastContentTab=activeTabIndex loadedTabId=tabsData[activeTabIndex].id or tabsData[activeTabIndex] loadedOffset=Vector3.zero sceneInvalid=false
 		updateDefaultStats() updateSceneStats()
 	end
 	local loadScene
 	loadScene=function(code)
 		if sceneLoading then pendingContent=code return false end
 		pendingContent=nil
-		if loadedContent==code and lastContentTab==activeTabIndex and loadedOffset==(_G.buildOffset or Vector3.zero) then sceneInvalid=false return true end
+		if loadedContent==code and loadedTabId==(tabsData[activeTabIndex].id or tabsData[activeTabIndex]) and loadedOffset==(_G.buildOffset or Vector3.zero) then lastContentTab=activeTabIndex sceneInvalid=false return true end
 		local blocks,invalid=parseBlocks(code,_G.buildOffset or Vector3.zero)
 		if invalid>0 then sceneInvalid=true setStatus("Импорт мастерской отклонён: некорректных записей "..invalid..", распознано деталей "..#blocks..". Исходная вкладка сохранена.",true) return false end
 		sceneLoading=true sceneInvalid=false
+		local loadRevision=sceneRevision
 		local tab=activeTabIndex
+		local tabId=tabsData[activeTabIndex].id or tabsData[activeTabIndex]
 		local offset=_G.buildOffset or Vector3.zero
 		clearSelection()
 		for part in pairs(parts) do part:Destroy() end
 		table.clear(parts) table.clear(order)
 		for i,b in ipairs(blocks) do
 			addPart(b)
-			if i%200==0 then task.wait() if unloaded then sceneLoading=false return false end end
+			if i%128==0 then task.wait() end
+			if unloaded or loadRevision~=sceneRevision or tab~=activeTabIndex then
+				sceneLoading=false sceneInvalid=true loadedContent=nil
+				for part in pairs(parts) do part:Destroy() end table.clear(parts) table.clear(order)
+				local latest=pendingContent pendingContent=nil
+				if latest~=nil and not unloaded and mode=="create" then task.defer(function() if not unloaded and mode=="create" then loadScene(latest) end end) end
+				return false
+			end
 		end
-		loadedContent=code lastContentTab=tab loadedOffset=offset
+		loadedContent=code lastContentTab=activeTabIndex loadedTabId=tabId loadedOffset=offset
 		sceneLoading=false
 		updateSceneStats()
 		if pendingContent~=nil then
@@ -4892,10 +5237,11 @@ return UI
 		if updatingScene then return end
 		sceneRevision+=1
 		local revision=sceneRevision
+		if mode=="create" and not sceneLoading and loadedContent==value and loadedTabId==(tabsData[activeTabIndex].id or tabsData[activeTabIndex]) and loadedOffset==(_G.buildOffset or Vector3.zero) then lastContentTab=activeTabIndex sceneInvalid=false return end
 		if mode=="create" then
 			pendingContent=value
 			task.defer(function()
-				if revision~=sceneRevision or unloaded or mode~="create" then return end
+				if revision~=sceneRevision or unloaded or mode~="create" then if revision==sceneRevision then pendingContent=nil end return end
 				loadScene(value)
 			end)
 		end
@@ -4922,7 +5268,16 @@ return UI
 		for _,tool in pairs(tools) do if tool.Parent and tool.Parent==LocalPlayer.Character and backpack then tool.Parent=backpack end end
 	end
 	setMode=function(nextMode)
-		if blocked() then setStatus("Сначала поставь строительство на паузу",true) return end
+		if _G.autobuildRunning and StudioHooks.documents then StudioHooks.documents.runUI(function() setMode(nextMode) end) return end
+		if unloaded or _G.autobuildRunning or busySaving then setStatus("Сначала поставь строительство на паузу",true) return end
+		if nextMode~="create" and (sceneLoading or pendingContent~=nil) then
+			sceneRevision+=1 pendingContent=nil sceneInvalid=true loadedContent=nil
+			releaseTool() clearSelection()
+			mode=nextMode codeOpen=false moreOpen=false
+			for _,tool in pairs(tools) do tool.Enabled=false end
+			applyTheme(nextMode=="load" and "load" or "create") syncVisibility() renderTabs()
+			return
+		end
 		if nextMode=="create" and mode~="create" then
 			local code=_G.fullBuildString or textBox.Text
 			local _,invalid=parseBlocks(code,Vector3.zero)
@@ -4937,9 +5292,9 @@ return UI
 				code=""
 			end
 			cleanupVisuals(true)
-			if not loadScene(code) then return end
+			if not loadScene(code) then if pendingContent~=nil then mode="create" codeOpen=false syncVisibility() end return end
 		elseif mode=="create" and nextMode~="create" then
-			if not sceneInvalid then commit() end
+			if not sceneInvalid and loadedContent~=tabsData[activeTabIndex].content then commit() end
 			releaseTool() clearSelection()
 		end
 		mode=nextMode codeOpen=false materialList.Visible=false
@@ -5504,4 +5859,4 @@ unloadScript = function()
 end
 
 _G.AUTOBUILD_UNLOAD = unloadScript
-setStatus("ORBIT guard-10: защита деталей и подтверждаемая расчистка препятствий")
+setStatus("ORBIT documents-11: отдельные файлы построек, страницы кода и независимые вкладки")

@@ -14,3 +14,8 @@ AutobuildRecovery.json
 AutobuildPending.json
 AutobuildTiming.json
 AutobuildGuard.json
+OrbitBuild_*.txt
+OrbitBuild_*.txt.*
+OrbitRecovery_*.json
+OrbitSessions.json
+AutobuildData.json.legacy-v5.backup
