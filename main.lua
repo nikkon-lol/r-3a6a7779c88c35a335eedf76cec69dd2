@@ -515,7 +515,7 @@ local function updateDefaultStats()
 end
 
 btnLog.MouseButton1Click:Connect(function()
-	local text="Autobuild Studio v5 / ORBIT · recovery-6\n"..table.concat(diagnosticLog,"\n")
+	local text="Autobuild Studio v5 / ORBIT · speed-7\n"..table.concat(diagnosticLog,"\n")
 	if storageError then text=text.."\nStorage: "..storageError end
 	if copyText(text) then setStatus("Диагностика скопирована") else setStatus("Буфер обмена недоступен",true) end
 end)
@@ -682,7 +682,7 @@ end
 
 local function getSafePing()
 	local ok, ping = pcall(function() return LocalPlayer:GetNetworkPing() end)
-	if not ok or not ping or ping <= 0 then ping = 0.05 end
+	if not ok or type(ping)~="number" or ping~=ping or ping<=0 or ping==math.huge then ping=0.05 end
 	return ping
 end
 
@@ -1249,7 +1249,9 @@ P.geometry=geometry
 local function colorEqual(a,b) return math.abs(a.R-b.R)<=1/255+.0001 and math.abs(a.G-b.G)<=1/255+.0001 and math.abs(a.B-b.B)<=1/255+.0001 end
 local function styleCost(source,target)
 	local cost=0
-	if not source or not colorEqual(source.color,target.color) or source.material~=target.material then cost=cost+1 end
+	local defaultColor=source and source.color or {R=192/255,G=192/255,B=192/255}
+	local defaultMaterial=source and source.material or Enum.Material.Plastic
+	if not colorEqual(defaultColor,target.color) or defaultMaterial~=target.material then cost=cost+1 end
 	if (not source and not target.collide) or (source and source.collide~=target.collide) then cost=cost+1 end
 	local wanted={}
 	for _,sp in ipairs(target.sprays) do wanted[sp.face]=sp end
@@ -1491,6 +1493,76 @@ local function nearestModels(target,models,maximum)
 	table.sort(heap,function(a,b) return a.distance<b.distance end)
 	local result={} for _,v in ipairs(heap) do result[#result+1]=v.model end return result
 end
+P.version="bounds-v4-time-7"
+function P.measurePlan(plan,position,timing)
+	timing=timing or {pace=.24,move=.24,ack=.16,height=12,frame=1/60}
+	local elapsed,lastCreate,moves,distance,descending=0,-math.huge,0,0,0
+	local agent=position or plan.items[1].target.pos
+	local previousBottom
+	local function near(point,source)
+		if (agent-point).Magnitude<=20 and (not source or (agent-source).Magnitude<=20) then return end
+		local anchor=point local height=timing.height or 12
+		if source then
+			local gap=(point-source).Magnitude anchor=(point+source)/2
+			if math.abs(point.Y-source.Y)>.01 then height=math.min(height,19.8-gap/2)
+			else height=math.min(height,math.sqrt(math.max(0,19.8^2-(gap/2)^2))) end
+		end
+		local nextPosition=anchor+Vector3.new(0,height,0)
+		distance+=(nextPosition-agent).Magnitude agent=nextPosition moves+=1 elapsed+=timing.move
+	end
+	local function clone(source,face)
+		for _,d in ipairs(dirs) do if d.face==face then return source.pos+d.unit*(source.size[d.axis]/2) end end
+		return source.pos
+	end
+	local function create(point,source)
+		near(point,source) elapsed=math.max(elapsed,lastCreate+timing.pace) lastCreate=elapsed elapsed+=timing.ack
+	end
+	for _,r in ipairs(plan.items) do
+		local bottom=r.target.pos.Y-r.target.size.Y/2
+		if previousBottom and bottom<previousBottom-.025 then descending+=1 end previousBottom=bottom
+		local source=r.source
+		for _,helper in ipairs(r.helpers or {}) do
+			create(clone(source,r.face),source.pos) source=helper
+		end
+		if r.kind~="reuse" and r.kind~="edit" then
+			if source then create(clone(source,r.face),source.pos) else create(r.initial.pos) end
+		end
+		for _,step in ipairs(r.steps or {}) do near(step.before.pos) elapsed+=timing.ack end
+		if r.styleSteps>0 then near(r.target.pos) elapsed+=r.styleSteps*timing.ack end
+		for n=#(r.helpers or {}),1,-1 do near(r.helpers[n].pos) elapsed+=timing.ack end
+	end
+	plan.estimatedSeconds=elapsed plan.teleports=moves plan.travelDistance=distance plan.descending=descending plan.plannerVersion=P.version
+	return elapsed
+end
+function P.reviewLive(reviewed,target,sources,obstacles,allTargets)
+	if not reviewed or not reviewed.initial then return nil end
+	if reviewed.kind=="normal" then
+		if reviewed.initial.size~=Vector3.new(4,4,4) then return nil end
+		for _,a in ipairs({"X","Y","Z"}) do if math.abs((reviewed.initial.pos[a]-2)%4)>.005 then return nil end end
+	elseif reviewed.kind=="detailed" then
+		if reviewed.initial.size~=Vector3.new(1,1,1) then return nil end
+		for _,a in ipairs({"X","Y","Z"}) do if math.abs(reviewed.initial.pos[a]%1-.5)>.005 then return nil end end
+	end
+	local source
+	if reviewed.source then
+		for _,m in ipairs(sources) do if m.id==reviewed.source.id and geometry(m,reviewed.source) and m.eligible~=false then source=m break end end
+		if not source then return nil end
+	end
+	if reviewed.kind=="reuse" and (not source or not geometry(source,target)) then return nil end
+	if reviewed.kind=="clone" or reviewed.kind=="bridge" then
+		if not source then return nil end
+		local predicted
+		for _,d in ipairs(dirs) do if d.face==reviewed.face then
+			for n,h in ipairs(reviewed.helpers) do if (h.pos-(source.pos+d.unit*source.size[d.axis]*n)).Magnitude>.025 or (h.size-source.size).Magnitude>.025 then return nil end end
+			predicted=source.pos+d.unit*source.size[d.axis]*(#reviewed.helpers+1) break
+		end end
+		if not predicted or (predicted-reviewed.initial.pos).Magnitude>.025 or (source.size-reviewed.initial.size).Magnitude>.025 then return nil end
+	end
+	local r=makeRecipe(reviewed.initial,target,source,reviewed.kind,reviewed.face,reviewed.helpers)
+	if not r then return nil end
+	return P.compile(r,obstacles,allTargets,(r.kind=="reuse" or r.kind=="edit") and source.id or nil)
+end
+
 function P.prepare(targets,world,options)
 	options=options or {}
 	local function checkpoint(text,fraction)
@@ -1552,7 +1624,10 @@ function P.prepare(targets,world,options)
 		table.sort(list,function(a,b) return a.saving>b.saving end)
 		futureList[id]={} for i=1,math.min(12,#list) do futureList[id][i]=list[i] end
 	end
-	local function evaluate(name,spatial,lookahead,planNumber)
+	local layerOrder={} for i,target in ipairs(targets) do layerOrder[#layerOrder+1]={index=i,bottom=target.pos.Y-target.size.Y/2} end
+	table.sort(layerOrder,function(a,b) if a.bottom==b.bottom then return a.index<b.index end return a.bottom<b.bottom end)
+	local timing=options.timing or {pace=.24,move=.24,ack=.16,height=12,frame=1/60}
+	local function evaluate(name,spatial,lookahead,planNumber,layers,patches)
 		local available={} local obstacles={} local done={} local plan={name=name,items={},operations=0,shapeSteps=0,helpers=0,score=0}
 		for _,m in ipairs(world) do available[m.id]=true obstacles[#obstacles+1]=m end
 		local obstacleIndex=Spatial.new(world)
@@ -1563,35 +1638,56 @@ function P.prepare(targets,world,options)
 		end
 		for i in ipairs(targets) do refresh(i) end
 		local position=options.position or targets[1].pos
+		local layerCursor=1
+		local patchCenter
 		for step=1,#targets do
+			while layerOrder[layerCursor] and done[layerOrder[layerCursor].index] do layerCursor+=1 end
+			local layerBottom=layerOrder[layerCursor] and layerOrder[layerCursor].bottom or math.huge
+			local patchBottom=math.huge
+			if patches then
+				if patchCenter then
+					for i,m in ipairs(targets) do if not done[i] and (m.pos.X-patchCenter.X)^2+(m.pos.Z-patchCenter.Z)^2<=24^2 then patchBottom=math.min(patchBottom,m.pos.Y-m.size.Y/2) end end
+				end
+				if patchBottom==math.huge then
+					local closest=math.huge
+					for i,m in ipairs(targets) do
+						if not done[i] and (step>1 or m.pos.Y-m.size.Y/2<=layerBottom+.025) then
+							local d=(m.pos.X-position.X)^2+(m.pos.Z-position.Z)^2
+							if d<closest then closest=d patchCenter=m.pos end
+						end
+					end
+					for i,m in ipairs(targets) do if not done[i] and (m.pos.X-patchCenter.X)^2+(m.pos.Z-patchCenter.Z)^2<=24^2 then patchBottom=math.min(patchBottom,m.pos.Y-m.size.Y/2) end end
+				end
+			end
 			local best,bestIndex,bestScore=nil,nil,math.huge
 			local evaluations={}
 			for i,target in ipairs(targets) do
-				if not done[i] then
+				if not done[i] and (not layers or target.pos.Y-target.size.Y/2<=layerBottom+.025) and (not patches or (target.pos.X-patchCenter.X)^2+(target.pos.Z-patchCenter.Z)^2<=24^2 and target.pos.Y-target.size.Y/2<=patchBottom+.025) then
 					local r=ready[i]
 					if r and r.source and not available[r.source.id] then refresh(i) r=ready[i] end
 					if r then
 						local distance=math.sqrt(distanceSquared(target.pos,position))
-						local travel=distance>20 and 2+.002*distance or .001*distance
-						local score=spatial and distance or r.operations+travel
+						local travel=(layers or patches) and (distance>16 and timing.move+.0001*distance or .0001*distance) or (distance>20 and 2+.002*distance or .001*distance)
+						local unit=(layers or patches) and timing.ack or 1
+						local score=spatial and distance or r.operations*unit+travel
 						if lookahead then
 							local counted=0
 							for _,saving in ipairs(futureList[target.id] or {}) do
-								if not done[saving.index] and saving.index~=i then score=score-.2*saving.saving counted=counted+1 if counted==3 then break end end
+								if not done[saving.index] and saving.index~=i then score=score-.2*saving.saving*unit counted=counted+1 if counted==3 then break end end
 							end
 						end
 						evaluations[#evaluations+1]={index=i,score=score,recipe=r}
 					end
 				end
 			end
-			table.sort(evaluations,function(a,b) return a.score<b.score end)
+			table.sort(evaluations,function(a,b) if (layers or patches) and a.score==b.score then return a.index<b.index end return a.score<b.score end)
 			for _,choice in ipairs(evaluations) do
 				if best and choice.score>bestScore then break end
 				for _,candidate in ipairs(recipes[choice.index]) do
 					if not candidate.source or available[candidate.source.id] then
-						local compiled=P.compile(candidate,obstacles,targets,(candidate.kind=="reuse" or candidate.kind=="edit") and candidate.source.id or nil,function() checkpoint(name..": проверка промежуточных объёмов",.45+.55*(planNumber-1+step/#targets)/3) end,obstacleIndex,targetIndex)
+						local compiled=P.compile(candidate,obstacles,targets,(candidate.kind=="reuse" or candidate.kind=="edit") and candidate.source.id or nil,function() checkpoint(name..": проверка промежуточных объёмов",.45+.55*(planNumber-1+step/#targets)/5) end,obstacleIndex,targetIndex)
 						if compiled then
-							local score=choice.score+(spatial and 0 or compiled.operations-choice.recipe.operations)
+							local score=choice.score+(spatial and 0 or (compiled.operations-choice.recipe.operations)*((layers or patches) and timing.ack or 1))
 							if score<bestScore then best,bestIndex,bestScore=compiled,choice.index,score end
 							break
 						end
@@ -1616,18 +1712,24 @@ function P.prepare(targets,world,options)
 			obstacleIndex:add(target)
 			if step%8==0 or step==#targets then
 				if options.visual then options.visual("candidate",plan,step) end
-				checkpoint(name..": "..step.."/"..#targets,.45+.55*(planNumber-1+step/#targets)/3) end
+				checkpoint(name..": "..step.."/"..#targets,.45+.55*(planNumber-1+step/#targets)/5) end
 		end
+		P.measurePlan(plan,options.position or targets[1].pos,timing)
 		return plan
 	end
 	local candidates={}
-	for number,setting in ipairs({{"Пространственный",true,false},{"Стоимость операций",false,false},{"Выгодные шаблоны",false,true}}) do
-		local plan,err=evaluate(setting[1],setting[2],setting[3],number)
+	for number,setting in ipairs({{"Пространственный",true,false},{"Стоимость операций",false,false},{"Выгодные шаблоны",false,true},{"Слои снизу",false,true,true},{"Участки снизу",false,true,false,true}}) do
+		local plan,err=evaluate(setting[1],setting[2],setting[3],number,setting[4],setting[5])
 		if plan then candidates[#candidates+1]=plan elseif options.progress then options.progress(setting[1]..": "..err,.9) end
 	end
 	if #candidates==0 then error("Безопасный план не найден; проверьте перекрытия и геометрию",0) end
-	table.sort(candidates,function(a,b) return a.score<b.score end)
-	local best=candidates[1] best.alternatives=candidates
+	table.sort(candidates,function(a,b) if a.estimatedSeconds==b.estimatedSeconds then return a.descending<b.descending end return a.estimatedSeconds<b.estimatedSeconds end)
+	local best=candidates[1]
+	local fastest=best.estimatedSeconds
+	-- Estimates cannot distinguish a few percent reliably; prefer fewer vertical
+	-- reversals inside a small time margin, without choosing a costly full sweep.
+	for _,candidate in ipairs(candidates) do if candidate.descending<best.descending and candidate.estimatedSeconds<=fastest*1.05 then best=candidate end end
+	best.alternatives=candidates
 	checkpoint("План готов: "..best.name,1)
 	return best
 end
@@ -1684,6 +1786,7 @@ function P.prepareOrdered(targets,scene,options,order)
 		if options.progress and (rank%8==0 or rank==#order) then options.progress("Адаптация маршрута: "..rank.."/"..#targets,rank/#targets) end
 	end
 	if #order~=#targets then error("Шаблон не охватывает все цели",0) end
+	P.measurePlan(plan,options.position or targets[1].pos,options.timing)
 	return plan
 end
 
@@ -1696,7 +1799,42 @@ local collisionState, toolState = {}, {}
 local equippedCharacter=nil
 local function cancelled() return unloaded or _G.stopautobuild == true end
 local function roundTripPing() return getSafePing()*2 end
-local function responseTimeout(minimum) return math.max(minimum,roundTripPing()*4+.1) end
+StudioHooks.timing=(function()
+	local T={multiplier=2,frame=1/60,slowFrame=1/60,samples=0,acks={}}
+	local file="AutobuildTiming.json"
+	local function finite(n) return type(n)=="number" and n==n and math.abs(n)<math.huge end
+	if readfile and isfile then pcall(function()
+		if isfile(file) then local v=HttpService:JSONDecode(readfile(file)) if type(v)=="table" and finite(v.multiplier) then T.multiplier=math.clamp(v.multiplier,1.2,3) end end
+	end) end
+	function T.set(value)
+		if not finite(value) then return false end
+		T.multiplier=math.round(math.clamp(value,1.2,3)*10)/10
+		if writefile then pcall(function() writefile(file,HttpService:JSONEncode({version=1,multiplier=T.multiplier})) end) end
+		return true
+	end
+	function T.sample(dt)
+		if not finite(dt) or dt<=0 then return end
+		dt=math.clamp(dt,1/360,2)
+		T.frame=T.samples==0 and dt or T.frame+(dt-T.frame)*.15
+		T.slowFrame=math.max(T.frame,dt,T.slowFrame*.92) T.samples+=1
+	end
+	function T.frameBudget() return math.max(T.frame,T.slowFrame) end
+	function T.pace() return math.max(.025,getSafePing()*T.multiplier,T.frameBudget()*2) end
+	function T.settle(force) return T.pace()+(force and math.max(T.frameBudget(),getSafePing()*.5) or 0) end
+	function T.timeout(minimum) return math.max(minimum,getSafePing()*8+T.frameBudget()*6+.1) end
+	function T.observed(kind,seconds)
+		if not finite(seconds) or seconds<=0 or seconds>5 then return end
+		local old=T.acks[kind] T.acks[kind]=old and old+(seconds-old)*.15 or seconds
+	end
+	function T.profile()
+		return {pace=T.pace(),move=T.settle(false),ack=math.max(T.frameBudget(),T.acks.create or getSafePing()*1.4),height=CONFIG.BUILD_HEIGHT_OFFSET,frame=T.frameBudget()}
+	end
+	function T.summary() return string.format("Пинг ×%.1f · FPS ~%d · интервал ≥%.0f мс",T.multiplier,math.round(1/math.max(T.frame,1/360)),T.pace()*1000) end
+	trackConn(RunService.RenderStepped:Connect(function(dt) T.sample(dt) end))
+	return T
+end)()
+
+local function responseTimeout(minimum) return StudioHooks.timing.timeout(minimum) end
 local function waitUntil(predicate, seconds)
 	local deadline = os.clock() + seconds
 	repeat
@@ -2026,7 +2164,7 @@ local function readSprays(brick)
 	end
 	return sprays
 end
-local function snapshotWorld(session)
+local function snapshotWorld(session,geometryOnly)
 	local result,sources={},{}
 	local unfinished={}
 	for i,data in ipairs(session.blocks) do if not session.done[i] and data.placedBrick then unfinished[data.placedBrick]=true end end
@@ -2040,9 +2178,9 @@ local function snapshotWorld(session)
 			local worldSize=Vector3.new(math.abs(cf.RightVector.X)*size.X+math.abs(cf.UpVector.X)*size.Y+math.abs(cf.LookVector.X)*size.Z,math.abs(cf.RightVector.Y)*size.X+math.abs(cf.UpVector.Y)*size.Y+math.abs(cf.LookVector.Y)*size.Z,math.abs(cf.RightVector.Z)*size.X+math.abs(cf.UpVector.Z)*size.Y+math.abs(cf.LookVector.Z)*size.Z)
 			local id=session.ids[brick]
 			if not id then session.nextWorld=session.nextWorld+1 id="w:"..session.nextWorld session.ids[brick]=id end
-			local opaque=brick.Transparency<.001 or (brick.Material==Enum.Material.Glass and math.abs(brick.Transparency-.5)<.001)
-			local eligible=own and brick:IsDescendantOf(own) and identity and brick.Anchored and opaque and brick:IsA("Part") and brick.Shape==Enum.PartType.Block and SymbolToMaterial[MaterialSymbols[brick.Material]]~=nil
-			local model={id=id,pos=brick.Position,size=worldSize,color=brick.Color,material=brick.Material,collide=brick.CanCollide,sprays=readSprays(brick),instance=brick,external=true,eligible=eligible==true and not session.helpers[brick] and not unfinished[brick]}
+			local opaque=not geometryOnly and (brick.Transparency<.001 or (brick.Material==Enum.Material.Glass and math.abs(brick.Transparency-.5)<.001))
+			local eligible=not geometryOnly and own and brick:IsDescendantOf(own) and identity and brick.Anchored and opaque and brick:IsA("Part") and brick.Shape==Enum.PartType.Block and SymbolToMaterial[MaterialSymbols[brick.Material]]~=nil
+			local model={id=id,pos=brick.Position,size=worldSize,color=brick.Color,material=brick.Material,collide=brick.CanCollide,sprays=geometryOnly and {} or readSprays(brick),instance=brick,external=true,eligible=eligible==true and not session.helpers[brick] and not unfinished[brick]}
 			result[#result+1]=model
 			if model.eligible and not session.helpers[brick] then sources[#sources+1]=model end
 			session.instances[id]=brick
@@ -2111,7 +2249,7 @@ local function savePreparedPlan(session,scene,bridges)
 	if not writefile then return false end
 	local plan=session.plan
 	local clearance=planClearance(session)
-	local stored={version=4,planner="bounds-v3-studio-2",text=session.text,offset=planVector(session.offset),world=planWorldKey(scene,clearance),clearance={pos=planVector(clearance.pos),size=planVector(clearance.size)},bridges=bridges,name=plan.name,operations=plan.operations,shapeSteps=plan.shapeSteps,helpers=plan.helpers,items={}}
+	local stored={version=4,planner="bounds-v4-time-7",text=session.text,offset=planVector(session.offset),world=planWorldKey(scene,clearance),clearance={pos=planVector(clearance.pos),size=planVector(clearance.size)},bridges=bridges,name=plan.name,operations=plan.operations,shapeSteps=plan.shapeSteps,helpers=plan.helpers,items={}}
 	for _,item in ipairs(plan.items) do
 		local entry={index=item.index,kind=item.kind,operations=item.operations,shapeSteps=item.shapeSteps,helpers={}}
 		if item.source then entry.source={id=item.source.id,external=item.source.external==true,key=item.source.external and planModelKey(item.source) or nil} end
@@ -2129,7 +2267,7 @@ local function loadPreparedPlan(session,scene,bridges)
 	local ok,plan=pcall(function()
 		if not isfile(file) then return nil end
 		local stored=HttpService:JSONDecode(readfile(file))
-		if stored.version~=4 or stored.planner~="bounds-v3-studio-2" or stored.text~=session.text or readPlanVector(stored.offset)~=session.offset or stored.bridges~=bridges or type(stored.clearance)~="table" then return nil end
+		if stored.version~=4 or stored.planner~="bounds-v4-time-7" or stored.text~=session.text or readPlanVector(stored.offset)~=session.offset or stored.bridges~=bridges or type(stored.clearance)~="table" then return nil end
 		local clearance={pos=readPlanVector(stored.clearance.pos),size=readPlanVector(stored.clearance.size)}
 		if not clearance.pos or not clearance.size or clearance.size.X<=0 or clearance.size.Y<=0 or clearance.size.Z<=0 or stored.world~=planWorldKey(scene,clearance) then return nil end
 		if type(stored.items)~="table" or #stored.items~=#session.models or type(stored.name)~="string" then return nil end
@@ -2142,7 +2280,13 @@ local function loadPreparedPlan(session,scene,bridges)
 			local i=entry.index
 			if type(i)~="number" or i%1~=0 or not session.models[i] or seen[i] or not kinds[entry.kind] then return nil end
 			if type(entry.operations)~="number" or entry.operations<0 or entry.operations%1~=0 or type(entry.shapeSteps)~="number" or entry.shapeSteps<0 or entry.shapeSteps%1~=0 or type(entry.helpers)~="table" or #entry.helpers>2 then return nil end
-			local item={index=i,kind=entry.kind,operations=entry.operations,shapeSteps=entry.shapeSteps,helpers={}}
+			local item={index=i,kind=entry.kind,operations=entry.operations,shapeSteps=entry.shapeSteps,helpers={},target=session.models[i]}
+			item.face=FaceSymbolsReverse[entry.face]
+			if entry.initial then
+				local p,size=readPlanVector(entry.initial.pos),readPlanVector(entry.initial.size)
+				if not p or not size or size.X<1 or size.Y<1 or size.Z<1 then return nil end
+				item.initial={pos=p,size=size}
+			end
 			if entry.source then
 				if type(entry.source)~="table" then return nil end
 				if entry.source.external then
@@ -2294,10 +2438,12 @@ function PlanLibrary.scan()
 end
 local function pack(session,scene,bridges)
 	local p=session.plan local clearance=planClearance(session)
-	local s={version=4,libraryVersion=1,planner="bounds-v3-studio-2",buildName=tabsData[activeTabIndex].name,createdAt=os.time(),requestedTemplate=PlanLibrary.selection(),text=session.text,offset=planVector(session.offset),world=planWorldKey(scene,clearance),clearance={pos=planVector(clearance.pos),size=planVector(clearance.size)},bridges=bridges,name=p.name,operations=p.operations,shapeSteps=p.shapeSteps,helpers=p.helpers,items={},models={}}
+	local s={version=4,libraryVersion=1,planner="bounds-v4-time-7",buildName=tabsData[activeTabIndex].name,createdAt=os.time(),requestedTemplate=PlanLibrary.selection(),text=session.text,offset=planVector(session.offset),world=planWorldKey(scene,clearance),clearance={pos=planVector(clearance.pos),size=planVector(clearance.size)},bridges=bridges,name=p.name,operations=p.operations,shapeSteps=p.shapeSteps,helpers=p.helpers,items={},models={}}
 	for i,m in ipairs(session.models) do s.models[i]={pos=planVector(m.pos),size=planVector(m.size)} end
 	for _,item in ipairs(p.items) do
 		local entry={index=item.index,kind=item.kind,operations=item.operations,shapeSteps=item.shapeSteps,helpers={}}
+		entry.face=FaceSymbols[item.face]
+		if item.initial then entry.initial={pos=planVector(item.initial.pos),size=planVector(item.initial.size)} end
 		if item.source then entry.source={id=item.source.id,external=item.source.external==true,key=item.source.external and planModelKey(item.source) or nil} end
 		for _,h in ipairs(item.helpers or {}) do entry.helpers[#entry.helpers+1]={pos=planVector(h.pos),size=planVector(h.size)} end
 		s.items[#s.items+1]=entry
@@ -2594,6 +2740,12 @@ savePreparedPlan=function(session,scene,bridges)
 	local old=selected~="auto" and readStored(selected)
 	local matched=old and PlanLibrary.match(old,session.models)
 	if old and owns(selected,old) and matched and matched.equivalent then
+		if old.planner~=Planner.version then
+			local upgraded=pack(session,scene,bridges) upgraded.buildId=PlanLibrary.id() upgraded.libraryVersion=2 upgraded.createdAt=old.createdAt
+			if writefile then pcall(function() writefile(selected,HttpService:JSONEncode(upgraded)) end) end
+			memory[selected]=upgraded
+			for i,row in ipairs(rows) do if row.file==selected then rows[i]=meta(selected,upgraded) break end end
+		end
 		session.planFile=selected bindings[PlanLibrary.id()]=selected
 		persistIndex() setStatus("План закреплён: "..selected.." · положение и поворот проверены") return true
 	end
@@ -2628,6 +2780,10 @@ PlanLibrary.prepare=function(targets,scene,options)
 	local stored=readStored(file)
 	if not stored then
 		setStatus("Закреплённый файл недоступен; рассчитываю новый план для этой постройки",true)
+		return Planner.prepare(targets,scene,options)
+	end
+	if owns(file,stored) and not choices[PlanLibrary.id()] and stored.planner~=Planner.version then
+		setStatus("Обновляю закреплённый план: расчёт времени и слои снизу")
 		return Planner.prepare(targets,scene,options)
 	end
 	if owns(file,stored) and not PlanLibrary.match(stored,targets) then
@@ -2787,7 +2943,7 @@ local function ensureNear(position,sourcePosition,force)
 	end
 	local target=anchor+Vector3.new(0,height,0)
 	lockPosition(target)
-	local readyAt=os.clock()+math.max(.08,roundTripPing()*2)
+	local readyAt=os.clock()+StudioHooks.timing.settle(force)
 	return waitUntil(function()
 		local c=LocalPlayer.Character
 		local r=c and c:FindFirstChild("HumanoidRootPart")
@@ -2962,6 +3118,7 @@ local createOnce=(function()
 	end
 	local function accept(holder,part,session)
 		local c=holder.creation c.connection:Disconnect() active[c]=nil holder.creation=nil holder.brick=part holder.createBlocked=nil
+		if c.sentAt and c.attempts==1 then StudioHooks.timing.observed("create",os.clock()-c.sentAt) end
 		C.capture(session) return part
 	end
 	function C.create(holder,source,face,initial,mode,session,label)
@@ -3032,7 +3189,7 @@ local createOnce=(function()
 			if not Planner.safeBox(c.initial,holder.finalModel or c.initial,obstacles,nil,holder.temporary==true) then break end
 			if cancelled() then return nil,"Пауза; ожидание сохранено" end
 			if session.lastCreateSent then
-				if not waitUntil(function() return os.clock()-session.lastCreateSent>=math.max(.12,roundTripPing()) end,math.max(.5,roundTripPing()+.1)) then return nil,"Пауза; ожидание сохранено" end
+				if not waitUntil(function() return os.clock()-session.lastCreateSent>=StudioHooks.timing.pace() end,math.max(.5,StudioHooks.timing.pace()+.1)) then return nil,"Пауза; ожидание сохранено" end
 			end
 			found,reason=resolve(c,folder,holder,session) if found then return accept(holder,found,session) end
 			if reason then break end
@@ -3074,14 +3231,15 @@ local function boundaryEdit(brick,target,session,data)
 		if not waitUntil(function() return brick.Parent and (brick.Size-pending.step.after.size).Magnitude<.03 and (brick.Position-pending.step.after.pos).Magnitude<.03 end,responseTimeout(2)) then return false,"Ожидаю подтверждение ранее отправленного шага грани; повтор не отправлен" end
 		data.pendingResize=nil
 	end
+	if (brick.Position-target.pos).Magnitude<.03 and (brick.Size-target.size).Magnitude<.03 then return true end
 	local partial=instanceModel(brick,session.ids[brick] or "partial")
-	local obstacles=snapshotWorld(session)
+	local obstacles=snapshotWorld(session,true)
 	local recipe=Planner.chooseLive(target,{},obstacles,session.models,false,partial)
 	if not recipe then return false,"Нельзя безопасно изменить границы текущего блока" end
 	for _,step in ipairs(recipe.steps) do
 		if cancelled() then return false,"Пауза" end
 		if (brick.Position-step.before.pos).Magnitude>.03 or (brick.Size-step.before.size).Magnitude>.03 then return false,"Блок изменился до шага ресайза" end
-		local scene=snapshotWorld(session)
+		local scene=snapshotWorld(session,true)
 		if not Planner.safeBox(step.after,target,scene,session.ids[brick],false) then return false,"Путь изменения грани занят другим блоком" end
 		if not ensureNear(brick.Position) then return false,"Персонаж недоступен для ресайза" end
 		local tool=awaitTool("Shape")
@@ -3152,7 +3310,7 @@ local function executeBlock(data,index,session)
 	if not data.work then
 		local obstacles,sources=snapshotWorld(session)
 		local reviewed=session.planByIndex[index]
-		local recipe=Planner.chooseLive(target,sources,obstacles,session.models,reviewed.kind=="bridge" and findTool("Delete")~=nil)
+		local recipe=Planner.reviewLive(reviewed,target,sources,obstacles,session.models) or Planner.chooseLive(target,sources,obstacles,session.models,reviewed.kind=="bridge" and findTool("Delete")~=nil)
 		if not recipe then return false,"Нет безопасного способа создания блока "..index end
 		if recipe.kind=="bridge" then
 			local unchanged=#recipe.helpers==#reviewed.helpers
@@ -3226,10 +3384,12 @@ local function executeBlock(data,index,session)
 	session.ids[brick]=target.id session.instances[target.id]=brick
 	local ok,err=boundaryEdit(brick,target,session,data)
 	if not ok then return false,err end
+	if not matchesAll(brick,data) or data.pendingCollision then
 	if not ensureNear(brick.Position) then return false,"Не удалось подойти для проверки свойств" end
 	if not paintBlock(brick,data) then return false,"Цвет или материал не подтверждён" end
 	if not collisionConfirmed(brick,data) then return false,"Столкновения не подтверждены; повтор переключения не отправлен" end
 	for _,sp in ipairs(data.sprays) do if not sprayBlock(brick,sp) then return false,"Надпись не подтверждена" end end
+	end
 	if not matchesAll(brick,data) then return false,"Итоговая проверка геометрии или свойств не пройдена" end
 	for n=#work.helpers,1,-1 do local removed,message=deleteHelper(work.helpers[n],session) if not removed then return false,message end end
 	if not matchesAll(brick,data) then return false,"Целевой блок изменился после удаления временных деталей" end
@@ -3252,6 +3412,7 @@ local function runBuilderEngine(buildString,offset,prepareOnly)
 		StudioHooks.recovery.restore(resumeSession)
 	end
 	local session=resumeSession
+	if session.plan and session.plan.plannerVersion~=Planner.version then session.plan=nil session.planByIndex=nil session.previewInvalid=true end
 	session.actionRevision=(session.actionRevision or 0)+1
 	reconcileBuild(session)
 	_G.autobuildTotal=#session.blocks _G.autobuildPlaced=0
@@ -3266,7 +3427,8 @@ local function runBuilderEngine(buildString,offset,prepareOnly)
 		btnStart.Text="ГОТОВЛЮ ПЛАН"
 		local partials,activeSources=StudioHooks.recovery.preparation(session)
 		local cached=loadPreparedPlan(session,scene,findTool("Delete")~=nil)
-		session.plan=cached or PlanLibrary.prepare(session.models,scene,{partials=partials,activeSources=activeSources,bridges=findTool("Delete")~=nil,position=root and root.Position or session.models[1].pos,cancelled=cancelled,visual=function(phase,payload,count) PlanDrawing.progress(session,phase,payload,count) end,progress=function(text,fraction)
+		if cached then cached.plannerVersion=Planner.version end
+		session.plan=cached or PlanLibrary.prepare(session.models,scene,{partials=partials,activeSources=activeSources,timing=StudioHooks.timing.profile(),bridges=findTool("Delete")~=nil,position=root and root.Position or session.models[1].pos,cancelled=cancelled,visual=function(phase,payload,count) PlanDrawing.progress(session,phase,payload,count) end,progress=function(text,fraction)
 			setStatus(string.format("Подготовка %d%% · %s",math.round(fraction*100),text))
 			statDisplay.Text="Подготовка · "..#session.blocks.." блоков"
 			task.wait()
@@ -3276,6 +3438,7 @@ local function runBuilderEngine(buildString,offset,prepareOnly)
 		session.planByIndex={}
 		for _,item in ipairs(plan.items) do session.planByIndex[item.index]=item end
 		setStatus(string.format("План: %s · операций ~%d · грани %d · временных %d · подготовка %.1fс",plan.name,plan.operations,plan.shapeSteps,plan.helpers,os.clock()-started))
+		if plan.estimatedSeconds then setStatus(string.format("Прогноз ~%.1fс · перемещений %d · переходов вниз %d · %s",plan.estimatedSeconds,plan.teleports or 0,plan.descending or 0,StudioHooks.timing.summary())) end
 		for _,alternative in ipairs(plan.alternatives) do
 			setStatus(string.format("Вариант %s: операций ~%d, грани %d, временных %d",alternative.name,alternative.operations,alternative.shapeSteps,alternative.helpers))
 		end
@@ -3682,7 +3845,7 @@ local rail=create("Frame",{Name="Navigation",Parent=bodyFrame,Size=UDim2.new(0,8
 local divider=create("Frame",{Parent=rail,Position=UDim2.new(1,-1,0,0),Size=UDim2.new(0,1,1,0),BackgroundColor3=palette.line,BorderSizePixel=0}) skin(divider,"line")
 UI.createModeBtn=button(rail,"Творить",UDim2.fromOffset(8,23),UDim2.fromOffset(68,70),"base")
 UI.loadModeBtn=button(rail,"Грузить",UDim2.fromOffset(8,104),UDim2.fromOffset(68,70),"base")
-local settingsBtn=button(rail,"Вид",UDim2.fromOffset(8,185),UDim2.fromOffset(68,70),"base")
+local settingsBtn=button(rail,"Настр.",UDim2.fromOffset(8,185),UDim2.fromOffset(68,70),"base")
 local consoleBtn=button(rail,"Журнал",UDim2.new(0,8,1,-91),UDim2.fromOffset(68,70),"base")
 for _,pair in ipairs({{UI.createModeBtn,"cube"},{UI.loadModeBtn,"load"},{settingsBtn,"settings"}}) do
 	local b=pair[1] b.TextSize=10 b.TextYAlignment=Enum.TextYAlignment.Bottom create("UIPadding",{Parent=b,PaddingBottom=UDim.new(0,10)}) icon(b,pair[2],UDim2.fromOffset(22,13),24,Color3.fromRGB(158,160,191))
@@ -3823,11 +3986,28 @@ end
 StudioHooks.status=function() if console.Visible then refreshConsole() end end
 local function toggleConsole() console.Visible=not console.Visible if console.Visible then refreshConsole() end end
 trackConn(consoleBtn.MouseButton1Click:Connect(toggleConsole)) trackConn(closeConsole.MouseButton1Click:Connect(function() console.Visible=false end))
-local appearance=create("Frame",{Name="Appearance",Parent=bodyFrame,Position=UDim2.fromOffset(108,50),Size=UDim2.new(1,-128,1,-108),BackgroundColor3=C_GRAY,Visible=false}) skin(appearance,"deep") corners(appearance,8)
-label(appearance,"Вид рабочего пространства",UDim2.fromOffset(28,24),UDim2.new(1,-56,0,34),22,"text","strong")
-label(appearance,"Тёмная тема, фиолетовый космос и тёплый акцент загрузки.",UDim2.fromOffset(28,66),UDim2.new(1,-56,0,28),12,"muted")
-local starsToggle=button(appearance,"Звёзды: включены",UDim2.fromOffset(28,126),UDim2.fromOffset(270,38),"panel")
-label(appearance,"Right Shift скрывает окно, сохраняя работу.\nПеретаскивай окно за верхнюю панель.\nПотяни нижний правый угол, чтобы изменить размер.",UDim2.fromOffset(28,195),UDim2.new(1,-56,0,96),13,"muted")
+local appearance=create("ScrollingFrame",{Name="Appearance",Parent=bodyFrame,Position=UDim2.fromOffset(108,50),Size=UDim2.new(1,-128,1,-108),CanvasSize=UDim2.fromOffset(0,390),ScrollBarThickness=4,BackgroundColor3=C_GRAY,Visible=false}) skin(appearance,"deep") corners(appearance,8)
+label(appearance,"Настройки",UDim2.fromOffset(28,16),UDim2.new(1,-56,0,34),22,"text","strong")
+label(appearance,"Множитель пинга · от 1,2× до 3×",UDim2.fromOffset(28,60),UDim2.new(1,-56,0,25),13,"text")
+local pingMinus=button(appearance,"−",UDim2.fromOffset(28,92),UDim2.fromOffset(42,34)) pingMinus.Name="PingMinus"
+local pingValue=field(appearance,"2.0",UDim2.fromOffset(78,92),UDim2.fromOffset(92,34)) pingValue.Name="PingMultiplier"
+local pingPlus=button(appearance,"+",UDim2.fromOffset(178,92),UDim2.fromOffset(42,34)) pingPlus.Name="PingPlus"
+local pingInfo=label(appearance,"",UDim2.fromOffset(28,136),UDim2.new(1,-56,0,30),12,"muted")
+local function refreshPing()
+	pingValue.Text=string.format("%.1f",StudioHooks.timing.multiplier)
+	pingInfo.Text=StudioHooks.timing.summary()
+end
+local function changePing(value)
+	if StudioHooks.timing.set(value) then setStatus("Темп: "..StudioHooks.timing.summary()) end refreshPing()
+end
+trackConn(pingMinus.MouseButton1Click:Connect(function() changePing(StudioHooks.timing.multiplier-.1) end))
+trackConn(pingPlus.MouseButton1Click:Connect(function() changePing(StudioHooks.timing.multiplier+.1) end))
+trackConn(pingValue.FocusLost:Connect(function() changePing(tonumber((pingValue.Text:gsub(",",".")))) end))
+label(appearance,"При низком FPS интервалы увеличиваются автоматически. Каждый блок ожидает подтверждение; меньший множитель сокращает паузы между действиями.",UDim2.fromOffset(28,175),UDim2.new(1,-56,0,60),12,"muted")
+local starsToggle=button(appearance,"Звёзды: включены",UDim2.fromOffset(28,244),UDim2.fromOffset(270,34),"panel")
+label(appearance,"Right Shift скрывает окно. Перетаскивай за верхнюю панель; нижний правый угол меняет размер.",UDim2.fromOffset(28,296),UDim2.new(1,-56,0,70),12,"muted")
+refreshPing()
+StudioHooks.timingDisplay=function() if appearance.Visible then pingInfo.Text=StudioHooks.timing.summary() end end
 local appearanceOpen=false
 local state={mode="welcome",code=false,more=false,tool=nil,paint="both"}
 local function refreshVisibility()
@@ -3849,7 +4029,7 @@ local function refreshVisibility()
 	UI.selectionCopy.Visible=creating UI.selectionClear.Visible=creating UI.toCodeBtn.Visible=creating
 	UI.codeBtn.Visible=state.mode~="welcome" and not appearanceOpen
 	UI.codeBtn.Text=creating and (state.code and "Обзор" or "Код") or "К редактору"
-	screenTitle.Text=appearanceOpen and "Настройки вида" or creating and "Мастерская" or state.mode=="load" and "Загрузка постройки" or "Добро пожаловать"
+	screenTitle.Text=appearanceOpen and "Настройки" or creating and "Мастерская" or state.mode=="load" and "Загрузка постройки" or "Добро пожаловать"
 	for _,pair in ipairs({{UI.createModeBtn,creating},{UI.loadModeBtn,state.mode=="load"},{settingsBtn,appearanceOpen}}) do skin(pair[1],pair[2] and "soft" or "base",pair[2] and "accent" or "muted") end
 	local tool=state.tool or "mbuild"
 	UI.buildToggle.Visible=tool=="mbuild" UI.copyToggle.Visible=tool=="mbuild"
@@ -3877,7 +4057,7 @@ end
 function UI.mode(mode,code,more) state.mode=mode state.code=code state.more=more appearanceOpen=false refreshVisibility() end
 function UI.tool(name) state.tool=name refreshVisibility() end
 function UI.paint(name) state.paint=name refreshVisibility() end
-trackConn(settingsBtn.MouseButton1Click:Connect(function() appearanceOpen=not appearanceOpen refreshVisibility() end))
+trackConn(settingsBtn.MouseButton1Click:Connect(function() appearanceOpen=not appearanceOpen refreshPing() refreshVisibility() end))
 trackConn(starsToggle.MouseButton1Click:Connect(function()
 	settings.stars=not settings.stars starsToggle.Text=settings.stars and "Звёзды: включены" or "Звёзды: выключены"
 	for _,s in ipairs(stars) do s.Visible=settings.stars end
@@ -4758,8 +4938,9 @@ trackConn(RunService.RenderStepped:Connect(function()
 	lastTime = now
 	if now-lastPerfUpdate<.25 then return end
 	lastPerfUpdate=now
+	if StudioHooks.timingDisplay then StudioHooks.timingDisplay() end
 	local ping = math.round(getSafePing() * 2000)
-	perfDisplay.Text = string.format("FPS: %d  |  Ping×2: %dms", fps, ping)
+	perfDisplay.Text = string.format("FPS: %d | RTT: %dms | ×%.1f", math.round(1/StudioHooks.timing.frame), ping,StudioHooks.timing.multiplier)
 
 	if _G.autobuildRunning and _G.autobuildTotal and _G.autobuildTotal > 0 then
 		local total = _G.autobuildTotal
@@ -4806,4 +4987,4 @@ unloadScript = function()
 end
 
 _G.AUTOBUILD_UNLOAD = unloadScript
-setStatus("ORBIT recovery-6: восстановление создания и ускоренный расчёт готовы")
+setStatus("ORBIT speed-7: пинг от 1,2×, FPS и маршруты по времени")
