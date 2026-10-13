@@ -164,6 +164,7 @@ StudioHooks.documents=(function()
 	if type(registry)~="table" or registry.job~=game.JobId then registry={job=game.JobId,jobs={},orphans={}} _G.AUTOBUILD_DOCUMENT_JOBS=registry end
 	D.jobs=registry.jobs D.orphans=registry.orphans
 	function D.pending(session)
+		if StudioHooks.runtimeState then return StudioHooks.runtimeState.pending(session) end
 		for _,b in ipairs(session.blocks or {}) do
 			if b.creation or b.pendingResize and b.pendingResize.brick and b.pendingResize.brick.Parent or (b.pendingCollision or b.repairDeleteRequested) and b.placedBrick and b.placedBrick.Parent then return true end
 			for _,old in ipairs(b.retired or {}) do if (old.attempts or 1)>0 then return true end end
@@ -207,7 +208,8 @@ StudioHooks.documents=(function()
 				for _,old in ipairs(h.retired or {}) do add(old.initial) end
 				if h.brick and h.brick.Parent and (h.creation or h.temporary) then add({pos=h.brick.Position,size=h.brick.Size}) end
 			end
-			for _,b in ipairs(s.blocks) do
+			for i in pairs(StudioHooks.runtimeState.ensure(s).active) do
+				local b=s.blocks[i]
 				holder(b) for _,h in ipairs(b.work and b.work.helpers or {}) do holder(h) end
 				if b.pendingResize then add(b.pendingResize.step.before) add(b.pendingResize.step.after) end
 				if b.pendingCollision and b.placedBrick and b.placedBrick.Parent then add({pos=b.placedBrick.Position,size=b.placedBrick.Size}) end
@@ -250,7 +252,7 @@ StudioHooks.documents=(function()
 		for _,s in ipairs(D.otherJobs(session)) do
 			if s.helpers and s.helpers[part] then return true end
 			local state=s.obstacleDeletes and s.obstacleDeletes[part] if state and state.requested then return true end
-			for _,b in ipairs(s.blocks) do if b.placedBrick==part and (b.pendingResize or b.pendingCollision or b.repairDeleteRequested) then return true end end
+			for i in pairs(StudioHooks.runtimeState.ensure(s).active) do local b=s.blocks[i] if b.placedBrick==part and (b.pendingResize or b.pendingCollision or b.repairDeleteRequested) then return true end end
 		end
 		return false
 	end
@@ -270,7 +272,18 @@ StudioHooks.documents=(function()
 		local file="OrbitRecovery_"..key.."."..kind..".json"
 		if D.runtimeCache[file] then return D.runtimeCache[file] end
 		local ok,value=pcall(function() return HttpService:JSONDecode(readfile(file)) end)
-		if ok and type(value)=="table" then D.runtimeCache[file]=value return value end
+		if ok and type(value)=="table" then
+			if kind=="pending" and StudioHooks.recovery and StudioHooks.recovery.mergeJournal and isfile and isfile(file..".journal") then
+				local manifest=D.readRuntime(key,"manifest")
+				if manifest and type(manifest.text)=="string" then
+					local blocks=parseBlocks(manifest.text,Vector3.zero)
+					local session={buildId=manifest.buildId,blocks=blocks}
+					value=StudioHooks.recovery.mergeJournal(session,file,value)
+					if session.recoveryBlocked then error(session.recoveryBlocked.." · "..key,0) end
+				end
+			end
+			D.runtimeCache[file]=value return value
+		end
 	end
 	function D.paths(session,create)
 		if not session.recoveryKey then
@@ -332,7 +345,8 @@ if isfile and readfile then
 	end
 end
 local function saveData()
-	if StudioHooks.save then StudioHooks.save() end
+	local historyOK,historyError=true,nil
+	if StudioHooks.save then historyOK,historyError=pcall(StudioHooks.save) end
 	if not writefile then storageError="Нет writefile; вкладки доступны только в этом запуске" return end
 	local ok,err=pcall(function() local payload=HttpService:JSONEncode(StudioHooks.documents.manifest(tabsData))
 		writefile(SAVE_FILE..".pending",payload)
@@ -343,7 +357,7 @@ local function saveData()
 		end
 		writefile(SAVE_FILE,payload)
 		if readfile and readfile(SAVE_FILE)~=payload then error("Проверка сохранения не пройдена") end end)
-	storageError=not ok and tostring(err) or nil
+	storageError=not ok and tostring(err) or not historyOK and tostring(historyError) or nil
 end
 
 -- Styling & Palette
@@ -533,14 +547,9 @@ end)
 
 local unloadScript
 
-btnClose.MouseButton1Click:Connect(function()
-	bodyFrame.Visible = false
-	local tween = TweenService:Create(mainFrame, TweenInfo.new(0.25, Enum.EasingStyle.Back, Enum.EasingDirection.In), {Size = UDim2.new(0, 0, 0, 0)})
-	tween:Play()
-	tween.Completed:Connect(function()
-		unloadScript()
-	end)
-end)
+trackConn(btnClose.MouseButton1Click:Connect(function()
+	if unloadScript then unloadScript() end
+end))
 
 -- Tab Bar System
 local tabSection = create("Frame", {
@@ -785,7 +794,7 @@ local function updateDefaultStats()
 end
 
 btnLog.MouseButton1Click:Connect(function()
-	local text="Autobuild Studio v5 / ORBIT · live-13\n"..table.concat(diagnosticLog,"\n")
+	local text="Autobuild Studio v5 / ORBIT · indexed-14\n"..table.concat(diagnosticLog,"\n")
 	if storageError then text=text.."\nStorage: "..storageError end
 	if copyText(text) then setStatus("Диагностика скопирована") else setStatus("Буфер обмена недоступен",true) end
 end)
@@ -1713,7 +1722,12 @@ local function safeBox(box,target,obstacles,exclude,strict,index)
 end
 P.safeBox=safeBox
 local permutations={{"X","Y","Z"},{"X","Z","Y"},{"Y","X","Z"},{"Y","Z","X"},{"Z","X","Y"},{"Z","Y","X"}}
+local liveTargetIndices=setmetatable({},{__mode="k"})
 function P.compile(recipe,obstacles,allTargets,exclude,checkpoint,obstacleIndex,targetIndex)
+	if not targetIndex and recipe.kind=="bridge" then
+		targetIndex=liveTargetIndices[allTargets]
+		if not targetIndex then targetIndex=Spatial.new(allTargets) liveTargetIndices[allTargets]=targetIndex end
+	end
 	if recipe.kind=="bridge" then
 		for _,helper in ipairs(recipe.helpers) do
 			if not safeBox(helper,recipe.target,obstacles,nil,true,obstacleIndex) or not safeBox(helper,recipe.target,allTargets,nil,true,targetIndex) then return nil end
@@ -2340,6 +2354,7 @@ local function clearPlanPreview()
 	end
 end
 local function markPlanProgress(session,index)
+	if StudioHooks.runtimeState then StudioHooks.runtimeState.touch(session,index) end
 	if not visualFolder or not (session.visiblePlanIndices and session.visiblePlanIndices[index]) then return end
 	local m=session.models[index]
 	local part=visualFolder:FindFirstChild("Plan_State_"..index)
@@ -2478,31 +2493,79 @@ local function readSprays(brick)
 	end
 	return sprays
 end
--- Cache membership only. Geometry/properties are read live before each action.
+-- Mutable broad phase. Exact geometry and properties are checked by the caller.
 StudioHooks.liveWorld=(function()
-	local W={}
+	local W={visited=0,queries=0}
 	local root,parts,positions,added,removing
+	local entries,buckets,large,dynamic,untracked={},{},{},{},{}
+	local function unlink(part)
+		local entry=entries[part]
+		if entry then for _,key in ipairs(entry.keys) do local bucket=buckets[key] if bucket then bucket[part]=nil if not next(bucket) then buckets[key]=nil end end end end
+		large[part]=nil
+	end
+	local function ranges(box)
+		local lo,hi=box.pos-box.size/2,box.pos+box.size/2
+		local x,y,z=math.floor(lo.X/16),math.floor(lo.Y/16),math.floor(lo.Z/16)
+		local a,b,c=math.floor(hi.X/16),math.floor(hi.Y/16),math.floor(hi.Z/16)
+		return x,y,z,a,b,c,(a-x+1)*(b-y+1)*(c-z+1)
+	end
+	local function worldBox(part)
+		local cf,size=part.CFrame,part.Size
+		if cf and cf.RightVector then
+			size=Vector3.new(math.abs(cf.RightVector.X)*size.X+math.abs(cf.UpVector.X)*size.Y+math.abs(cf.LookVector.X)*size.Z,math.abs(cf.RightVector.Y)*size.X+math.abs(cf.UpVector.Y)*size.Y+math.abs(cf.LookVector.Y)*size.Z,math.abs(cf.RightVector.Z)*size.X+math.abs(cf.UpVector.Z)*size.Y+math.abs(cf.LookVector.Z)*size.Z)
+		end
+		return {pos=part.Position,size=size}
+	end
+	local function update(part)
+		local entry=entries[part] if not entry then return end
+		unlink(part) entry.keys={}
+		dynamic[part]=not part.Anchored and true or nil
+		local x,y,z,a,b,c,count=ranges(worldBox(part))
+		if count~=count or count>512 then large[part]=true return end
+		for i=x,a do for j=y,b do for k=z,c do
+			local key=i..":"..j..":"..k local bucket=buckets[key]
+			if not bucket then bucket={} buckets[key]=bucket end
+			bucket[part]=true entry.keys[#entry.keys+1]=key
+		end end end
+	end
+	local function remove(part)
+		local entry=entries[part] if not entry then return end
+		unlink(part) if entry.connection then entry.connection:Disconnect() end
+		entries[part]=nil dynamic[part]=nil untracked[part]=nil
+		local index=positions[part] local last=parts[#parts]
+		parts[index]=last parts[#parts]=nil positions[part]=nil
+		if last~=part then positions[last]=index end
+	end
 	local function close()
 		if added then added:Disconnect() added=nil end
 		if removing then removing:Disconnect() removing=nil end
-		root=nil parts=nil positions=nil
+		for _,entry in pairs(entries) do if entry.connection then entry.connection:Disconnect() end end
+		root=nil parts=nil positions=nil entries={} buckets={} large={} dynamic={} untracked={}
 	end
-	function W.parts(folder)
+	function W.parts(folder,cooperate)
 		if not folder then return {} end
-		-- Test/older environments without descendant events use a fresh snapshot.
 		if not folder.DescendantAdded or not folder.DescendantRemoving then return folder:GetDescendants() end
 		if root~=folder then
 			close() root=folder parts={} positions={}
 			local function add(part)
-				if part:IsA("BasePart") and not positions[part] then parts[#parts+1]=part positions[part]=#parts end
+				if not part:IsA("BasePart") or entries[part] then return end
+				parts[#parts+1]=part positions[part]=#parts entries[part]={keys={}}
+				if part.Changed then
+					entries[part].connection=part.Changed:Connect(function(property)
+						if property=="CFrame" or property=="Position" or property=="Orientation" or property=="Rotation" or property=="Size" or property=="Anchored" then update(part) end
+					end)
+				else untracked[part]=true end
+				update(part)
 			end
 			added=trackConn(folder.DescendantAdded:Connect(add))
-			removing=trackConn(folder.DescendantRemoving:Connect(function(part)
-				local index=positions[part] if not index then return end
-				local last=parts[#parts] parts[index]=last parts[#parts]=nil positions[part]=nil
-				if last~=part then positions[last]=index end
-			end))
-			for _,part in ipairs(folder:GetDescendants()) do add(part) end
+			removing=trackConn(folder.DescendantRemoving:Connect(remove))
+			local slice=os.clock()
+			for index,part in ipairs(folder:GetDescendants()) do
+				add(part)
+				if cooperate and index%128==0 and os.clock()-slice>=.004 then
+					if cooperate()==false or root~=folder then return {} end slice=os.clock()
+				end
+			end
 		end
 		return parts
 	end
@@ -2517,27 +2580,88 @@ StudioHooks.liveWorld=(function()
 	end
 	function W.near(part,focus)
 		if not focus then return true end
-		-- A circumscribed sphere covers rotated, non-queryable and hollow parts.
-		local delta=part.Position-focus.pos local half=focus.size/2
-		local x=math.max(0,math.abs(delta.X)-half.X)
-		local y=math.max(0,math.abs(delta.Y)-half.Y)
-		local z=math.max(0,math.abs(delta.Z)-half.Z)
-		local size=part.Size
-		return x*x+y*y+z*z<=(size.X*size.X+size.Y*size.Y+size.Z*size.Z)/4+.01
+		local box=worldBox(part) local delta=box.pos-focus.pos local half=(box.size+focus.size)/2
+		return math.abs(delta.X)<=half.X+.01 and math.abs(delta.Y)<=half.Y+.01 and math.abs(delta.Z)<=half.Z+.01
+	end
+	function W.query(folder,focus)
+		local all=W.parts(folder) W.queries+=1
+		if not focus or root~=folder then W.visited+=#all return all end
+		local x,y,z,a,b,c,count=ranges(focus)
+		if count>4096 then W.visited+=#all return all end
+		local result,seen={},{}
+		local function add(part)
+			if seen[part] then return end seen[part]=true W.visited+=1
+			if part.Parent and W.near(part,focus) then result[#result+1]=part end
+		end
+		for i=x,a do for j=y,b do for k=z,c do local bucket=buckets[i..":"..j..":"..k] if bucket then for part in pairs(bucket) do add(part) end end end end end
+		for part in pairs(large) do add(part) end
+		-- Physics motion can bypass property signals; moving parts remain live.
+		for part in pairs(dynamic) do add(part) end
+		for part in pairs(untracked) do add(part) end
+		return result
 	end
 	W.close=close
 	return W
 end)()
 
+-- Sparse sets describe only unfinished work and explicit user controls.
+StudioHooks.runtimeState=(function()
+	local R={scanned=0,touched=0}
+	function R.touch(session,index)
+		local state=session.runtimeState local data=index and session.blocks[index]
+		if not state or not data then return end R.touched+=1
+		state.dirty[index]=true
+		local old=state.parts[index] if old then state.unfinished[old]=nil end
+		local part=not session.done[index] and data.placedBrick or nil
+		state.parts[index]=part if part then state.unfinished[part]=true end
+		local pending=data.creation or data.pendingResize or data.pendingCollision or data.repairDeleteRequested or #(data.retired or {})>0
+		for _,holder in ipairs(data.work and data.work.helpers or {}) do if holder.creation or holder.brick and holder.brick.Parent or #(holder.retired or {})>0 then pending=true break end end
+		state.active[index]=pending or data.work and not session.done[index] and true or nil
+		state.controls[index]=data.skipped or data.repairRequested or data.failure or data.repairDeleteRequested or nil
+	end
+	function R.rebuild(session)
+		local old=session.runtimeState
+		session.runtimeState={active={},controls={},parts={},unfinished={},dirty={}}
+		for index in ipairs(session.blocks) do R.scanned+=1 R.touch(session,index) end
+		local dirty={}
+		for index in pairs(session.runtimeState.active) do dirty[index]=true end
+		for index in pairs(session.runtimeState.controls) do dirty[index]=true end
+		if old then for index in pairs(old.active) do dirty[index]=true end for index in pairs(old.controls) do dirty[index]=true end end
+		session.runtimeState.dirty=dirty
+		return session.runtimeState
+	end
+	function R.ensure(session)
+		return session.runtimeState or R.rebuild(session)
+	end
+	function R.indices(session)
+		local state=R.ensure(session) local result={}
+		for index in pairs(state.active) do result[index]=true end
+		for index in pairs(state.controls) do result[index]=true end
+		return result
+	end
+	function R.pending(session)
+		local state=R.ensure(session)
+		for index in pairs(state.active) do
+			local b=session.blocks[index]
+			if b.creation or b.pendingResize and b.pendingResize.brick and b.pendingResize.brick.Parent or (b.pendingCollision or b.repairDeleteRequested) and b.placedBrick and b.placedBrick.Parent then return true end
+			for _,old in ipairs(b.retired or {}) do if (old.attempts or 1)>0 then return true end end
+			for _,h in ipairs(b.work and b.work.helpers or {}) do if h.creation or h.brick and h.brick.Parent then return true end end
+		end
+		for part,value in pairs(session.obstacleDeletes or {}) do if value.requested and part.Parent then return true end end
+		return false
+	end
+	return R
+end)()
+
 local function snapshotWorld(session,geometryOnly,focus)
 	local result,sources={},{}
-	local unfinished={}
-	for i,data in ipairs(session.blocks) do if not session.done[i] and data.placedBrick then unfinished[data.placedBrick]=true end end
+	local state=StudioHooks.runtimeState.ensure(session)
+	local unfinished=state.unfinished
 	local own=getPlayerBricksFolder()
 	local root=workspace:FindFirstChild("Bricks")
 	if not root then result.liveFocus=focus
 	return result,sources end
-	for _,brick in ipairs(StudioHooks.liveWorld.parts(root)) do
+	for _,brick in ipairs(StudioHooks.liveWorld.query(root,focus)) do
 		if brick:IsA("BasePart") and brick.Name=="Brick" and brick.Parent and StudioHooks.liveWorld.near(brick,focus) then
 			local cf,size=brick.CFrame,brick.Size
 			local identity=(cf.RightVector-Vector3.new(1,0,0)).Magnitude<.001 and (cf.UpVector-Vector3.new(0,1,0)).Magnitude<.001
@@ -2552,7 +2676,8 @@ local function snapshotWorld(session,geometryOnly,focus)
 			session.instances[id]=brick
 		end
 	end
-	for i,data in ipairs(session.blocks) do
+	for i in pairs(state.active) do
+		local data=session.blocks[i]
 		local function reserve(holder,suffix)
 			local function include(initial,tag)
 				if initial then result[#result+1]={id="reserved:"..i..suffix..tag,reservedTarget=session.models[i].id,reservedHolder=holder,pos=initial.pos,size=initial.size,color=data.color,material=data.material,collide=true,sprays={},eligible=false} end
@@ -3338,7 +3463,15 @@ local createOnce=(function()
 	local manifestFile="AutobuildRecovery.json"
 	local stateFile="AutobuildPending.json"
 	local lastManifest
-	local function descendants(folder) return folder.GetDescendants and folder:GetDescendants() or folder:GetChildren() end
+	local function descendants(folder,focus)
+		local root=workspace:FindFirstChild("Bricks")
+		if focus and root and (folder==root or folder.IsDescendantOf and folder:IsDescendantOf(root)) then
+			local result={}
+			for _,part in ipairs(StudioHooks.liveWorld.query(root,focus)) do if part:IsDescendantOf(folder) then result[#result+1]=part end end
+			return result
+		end
+		return folder.GetDescendants and folder:GetDescendants() or folder:GetChildren()
+	end
 	local function ownPart(part,folder)
 		return part and part.Parent and part:IsA("BasePart") and part.Name=="Brick" and part.Anchored and part:IsDescendantOf(folder)
 	end
@@ -3357,7 +3490,7 @@ local createOnce=(function()
 	local function unique(model)
 		local folder=getPlayerBricksFolder() if not folder or not model then return nil end
 		local found
-		for _,part in ipairs(descendants(folder)) do if ownPart(part,folder) and same(part,model) then if found then return nil end found=part end end
+		for _,part in ipairs(descendants(folder,model)) do if ownPart(part,folder) and same(part,model) then if found then return nil end found=part end end
 		return found
 	end
 	local function packedHolder(holder)
@@ -3367,14 +3500,76 @@ local createOnce=(function()
 		if c then value.creation={initial=packedBox(c.initial),mode=c.mode,face=FaceSymbols[c.face],clone=c.expectedClone==true,beforeCount=c.beforeCount or 0,attempts=c.attempts or 1,sentUnix=c.sentUnix,source= c.source and c.source.Parent and packedSource(instanceModel(c.source,"checkpoint")) or nil} end
 		return value
 	end
-	function C.capture(session,persist)
+		local function checkpointIndices(session,persist)
+		local state=StudioHooks.runtimeState.ensure(session)
+		if appendfile and session.journalReady and persist~="flush" then return state.dirty end
+		return StudioHooks.runtimeState.indices(session)
+	end
+	local function writeCheckpoint(session,file,payload,persist)
+		if appendfile and session.journalReady and persist~="flush" then
+			session.journalSeq=(session.journalSeq or 0)+1 payload.seq=session.journalSeq payload.indices={}
+			for index in pairs(session.runtimeState.dirty) do payload.indices[#payload.indices+1]=index end
+			appendfile(file..".journal",HttpService:JSONEncode(payload).."\n")
+		else
+			payload.seq=session.journalSeq or 0
+			writefile(file,HttpService:JSONEncode(payload))
+			if appendfile then writefile(file..".journal","") session.journalReady=true end
+		end
+		session.runtimeState.dirty={}
+	end
+	local function mergeJournal(session,file,stored)
+		if not readfile or not isfile or not isfile(file..".journal") then return stored end
+		local text=readfile(file..".journal") if text=="" then return stored end
+		if stored.seq~=nil and (type(stored.seq)~="number" or stored.seq~=stored.seq or stored.seq<0 or stored.seq%1~=0) then session.recoveryBlocked="Неверная последовательность контрольного снимка" return stored end
+		local entries={}
+		for line in text:gmatch("([^\n]+)\n") do
+			local ok,value=pcall(function() return HttpService:JSONDecode(line) end)
+			if not ok or type(value)~="table" or value.job~=game.JobId or value.buildId~=session.buildId or type(value.seq)~="number" or value.seq~=value.seq or value.seq<1 or value.seq%1~=0 or type(value.indices)~="table" or type(value.records)~="table" or type(value.controls)~="table" then
+				session.recoveryBlocked="Повреждён журнал незавершённых команд; новые команды остановлены" return stored
+			end
+			if value.seq>(stored.seq or 0) then entries[#entries+1]=value end
+		end
+		if text:sub(-1)~="\n" then session.recoveryBlocked="Не завершена запись журнала команд; требуется сверка" return stored end
+		table.sort(entries,function(a,b) return a.seq<b.seq end)
+		local records,controls={},{}
+		for _,record in ipairs(stored.records or {}) do records[record.index]=record end
+		for _,control in ipairs(stored.controls or {}) do controls[control.index]=control end
+		for _,value in ipairs(entries) do
+			local changed={}
+			for _,index in ipairs(value.indices) do
+				if type(index)~="number" or index%1~=0 or index<1 or index>#session.blocks then session.recoveryBlocked="Неверный индекс в журнале команд" return stored end
+				changed[index]=true
+				records[index]=nil controls[index]=nil
+			end
+			for _,record in ipairs(value.records) do
+				if type(record)~="table" or not changed[record.index] then session.recoveryBlocked="Неверная запись в журнале команд" return stored end
+				records[record.index]=record
+			end
+			for _,control in ipairs(value.controls) do
+				if type(control)~="table" or not changed[control.index] then session.recoveryBlocked="Неверная запись управления в журнале" return stored end
+				controls[control.index]=control
+			end
+			stored.obstacles=value.obstacles stored.seq=value.seq
+		end
+		stored.records={} stored.controls={}
+		for _,record in pairs(records) do stored.records[#stored.records+1]=record end
+		for _,control in pairs(controls) do stored.controls[#stored.controls+1]=control end
+		session.journalSeq=stored.seq or 0
+		return stored
+	end
+
+	function C.capture(session,persist,index)
+		StudioHooks.runtimeState.ensure(session)
+		StudioHooks.runtimeState.touch(session,index or session.activeIndex or session.lastFailedIndex)
 		local manifestFile,stateFile=manifestFile,stateFile
 		if StudioHooks.documents then manifestFile,stateFile=StudioHooks.documents.paths(session,true) end
 		_G.AUTOBUILD_RESUME={version=2,job=game.JobId,session=session}
-		if persist==false or not writefile then return end
+		if persist==false then return true end
+		if not writefile then return false,"Нет writefile; состояние сохранено только в памяти" end
 		local records={}
 		local controls={}
-		for index,data in ipairs(session.blocks) do
+		for index in pairs(checkpointIndices(session,persist)) do
+			local data=session.blocks[index]
 			if data.skipped or data.repairRequested or data.failure or data.repairDeleteRequested then controls[#controls+1]={index=index,skipped=data.skipped==true,repair=data.repairRequested==true,deleteRequested=data.repairDeleteRequested==true,failure=data.failure,guard=data.guardDamage==true} end
 			if data.work and not session.done[index] then
 				local recipe=data.work.recipe
@@ -3389,10 +3584,11 @@ local createOnce=(function()
 			if not lastManifest or lastManifest.file~=manifestFile or lastManifest.id~=session.buildId or lastManifest.text~=session.text or lastManifest.offset~=session.offset then
 				writefile(manifestFile,HttpService:JSONEncode({version=1,job=game.JobId,buildId=session.buildId,text=session.text,offset=planVector(session.offset)})) lastManifest={file=manifestFile,id=session.buildId,text=session.text,offset=session.offset}
 			end
-			writefile(stateFile,HttpService:JSONEncode({version=1,job=game.JobId,buildId=session.buildId,records=records,controls=controls,obstacles=StudioHooks.guard and StudioHooks.guard.pack(session) or nil}))
+			writeCheckpoint(session,stateFile,{version=1,job=game.JobId,buildId=session.buildId,records=records,controls=controls,obstacles=StudioHooks.guard and StudioHooks.guard.pack(session) or nil},persist)
 		end)
 		if StudioHooks.documents then StudioHooks.documents.record(session) end
 		if not ok then setStatus("Состояние в памяти; контрольная запись не удалась: "..tostring(err),true) end
+		return ok,err
 	end
 	function C.restore(session)
 		local manifestFile,stateFile=manifestFile,stateFile
@@ -3402,6 +3598,8 @@ local createOnce=(function()
 			if not isfile(manifestFile) or not isfile(stateFile) then return end
 			local manifest=HttpService:JSONDecode(readfile(manifestFile)) local stored=HttpService:JSONDecode(readfile(stateFile))
 			if type(manifest)~="table" or type(stored)~="table" or manifest.version~=1 or stored.version~=1 or manifest.job~=game.JobId or stored.job~=game.JobId or manifest.buildId~=session.buildId or stored.buildId~=session.buildId or manifest.text~=session.text or readPlanVector(manifest.offset)~=session.offset or type(stored.records)~="table" then return end
+			stored=mergeJournal(session,stateFile,stored)
+			if session.recoveryBlocked then setStatus(session.recoveryBlocked,true) return end
 			for _,c in ipairs(stored.controls or {}) do
 				local data=type(c)=="table" and session.blocks[c.index]
 				if data then data.guardDamage=c.guard==true or nil data.skipped=c.skipped==true or nil data.repairRequested=c.repair==true or nil data.repairDeleteRequested=c.deleteRequested==true or nil data.failure=type(c.failure)=="string" and c.failure or nil end
@@ -3417,7 +3615,7 @@ local createOnce=(function()
 					local initial=type(old)=="table" and box(old.initial)
 					if initial then
 						local retired={initial=initial,candidates={},seen={},before={}}
-						if type(old.beforeCount)=="number" and old.beforeCount>0 then for _,p in ipairs(descendants(folder)) do if ownPart(p,folder) and same(p,initial) then retired.before[p]=true end end end
+						if type(old.beforeCount)=="number" and old.beforeCount>0 then for _,p in ipairs(descendants(folder,initial)) do if ownPart(p,folder) and same(p,initial) then retired.before[p]=true end end end
 						result.retired[#result.retired+1]=retired
 					end
 				end
@@ -3427,7 +3625,7 @@ local createOnce=(function()
 					if initial and (c.mode=="normal" or c.mode=="detailed") then
 						local age=type(c.sentUnix)=="number" and math.clamp(os.time()-c.sentUnix-1,0,600) or 0
 						result.creation={initial=initial,mode=c.mode,face=FaceSymbolsReverse[c.face] or Enum.NormalId.Top,expectedClone=c.clone==true,source=source,candidates={},seen={},before={},beforeCount=type(c.beforeCount)=="number" and math.max(0,c.beforeCount) or 0,attempts=type(c.attempts)=="number" and math.clamp(c.attempts,1,10000) or 1,sentAt=os.clock()-age,sentUnix=os.time()-age}
-						if result.creation.beforeCount>0 then for _,p in ipairs(descendants(folder)) do if ownPart(p,folder) and same(p,initial) then result.creation.before[p]=true end end end
+						if result.creation.beforeCount>0 then for _,p in ipairs(descendants(folder,initial)) do if ownPart(p,folder) and same(p,initial) then result.creation.before[p]=true end end end
 					end
 				end
 				return result
@@ -3479,7 +3677,7 @@ local createOnce=(function()
 		if c.connection then c.connection:Disconnect() end
 		c.folder=folder c.observerToken=observerToken c.seen=c.seen or {}
 		c.connection=(folder.DescendantAdded or folder.ChildAdded):Connect(function(part)
-			if part:IsA("BasePart") and not c.before[part] and not c.seen[part] then c.candidates[#c.candidates+1]=part c.seen[part]=true end
+			if part:IsA("BasePart") and not c.before[part] and not c.seen[part] and same(part,c.initial) then c.candidates[#c.candidates+1]=part c.seen[part]=true end
 		end)
 		active[c]=true c.nextScan=0
 	end
@@ -3489,7 +3687,7 @@ local createOnce=(function()
 		-- occur after the original hierarchy event, including under child Models.
 		if os.clock()>=(c.nextScan or 0) then
 			c.nextScan=os.clock()+.1
-			for _,part in ipairs(descendants(folder)) do
+			for _,part in ipairs(descendants(folder,c.initial)) do
 				if part:IsA("BasePart") and not c.before[part] and not c.seen[part] and same(part,c.initial) then c.candidates[#c.candidates+1]=part c.seen[part]=true end
 			end
 		end
@@ -3541,7 +3739,7 @@ local createOnce=(function()
 		end
 		if not c then
 			c={candidates={},seen={},before={},initial=initial,mode=mode,face=face or Enum.NormalId.Top,source=source,expectedClone=source~=nil,attempts=0,beforeCount=0,sentAt=-math.huge,roundAttempts=0}
-			for _,part in ipairs(descendants(folder)) do if ownPart(part,folder) and same(part,initial) then c.before[part]=true c.beforeCount+=1 end end
+			for _,part in ipairs(descendants(folder,initial)) do if ownPart(part,folder) and same(part,initial) then c.before[part]=true c.beforeCount+=1 end end
 			holder.creation=c
 		elseif not c.initial then
 			-- Migrate an in-memory pending request from the previous implementation.
@@ -3660,6 +3858,7 @@ local createOnce=(function()
 		end
 		clear(data) for _,h in ipairs(data.work and data.work.helpers or {}) do clear(h) end
 	end
+	C.mergeJournal=mergeJournal
 	StudioHooks.recovery=C
 	return C.create
 end)()
@@ -3867,7 +4066,7 @@ StudioHooks.control=(function()
 		local s,i,d=selected()
 		if not d or s.done[i] then setStatus("Нет текущего или проблемного блока",true) return false end
 		d.skipped=true d.repairRequested=nil d.repairInterrupt=nil
-		StudioHooks.recovery.capture(s) markPlanProgress(s,i)
+		StudioHooks.recovery.capture(s,nil,i) markPlanProgress(s,i)
 		setStatus("Пропущен блок №"..i..". Его отправленные запросы остаются под наблюдением.")
 		return true
 	end
@@ -3875,7 +4074,7 @@ StudioHooks.control=(function()
 		local s,i,d=selected()
 		if not d or s.done[i] then setStatus("Нет проблемного блока для переделки",true) return false end
 		d.skipped=nil d.repairRequested=true d.repairInterrupt=s.activeIndex==i or nil
-		s.lastFailedIndex=i StudioHooks.recovery.capture(s) markPlanProgress(s,i)
+		s.lastFailedIndex=i StudioHooks.recovery.capture(s,nil,i) markPlanProgress(s,i)
 		setStatus("Переделка блока №"..i.." поставлена в очередь")
 		if not isBuilding and StudioHooks.resumeRecovery then StudioHooks.resumeRecovery() end
 		return true
@@ -3934,7 +4133,7 @@ StudioHooks.control=(function()
 		if data.skipped then ok=false err="Пропущено пользователем" end
 		if not ok then data.failure=tostring(err or "Неизвестная ошибка") session.lastFailedIndex=index
 		else data.failure=nil if session.lastFailedIndex==index then session.lastFailedIndex=nil end end
-		if not ok then StudioHooks.recovery.capture(session) end
+		if not ok then StudioHooks.recovery.capture(session,nil,index) end
 		markPlanProgress(session,index)
 		return ok,err
 	end
@@ -4001,7 +4200,7 @@ StudioHooks.guard=(function()
 	end
 	function G.extendScene(session,scene)
 		local root=workspace:FindFirstChild("Bricks") if not root then return scene end
-		for _,brick in ipairs(StudioHooks.liveWorld.parts(root)) do
+		for _,brick in ipairs(StudioHooks.liveWorld.query(root,scene.liveFocus)) do
 			if brick:IsA("BasePart") and brick.Name~="Brick" and brick.Parent and StudioHooks.liveWorld.near(brick,scene.liveFocus) then
 				local m=G.worldBox(brick)
 				if not session.ids[brick] then session.nextWorld+=1 session.ids[brick]="w:"..session.nextWorld end
@@ -4054,7 +4253,7 @@ StudioHooks.guard=(function()
 		if not root then return true,false end
 		session.obstacleDeletes=session.obstacleDeletes or {}
 		for brick in pairs(session.obstacleDeletes) do if not brick.Parent then session.obstacleDeletes[brick]=nil end end
-		scene=G.extendScene(session,scene or snapshotWorld(session,true))
+		scene=G.extendScene(session,scene or snapshotWorld(session,true,box))
 		local reserved={} for _,m in ipairs(scene) do if m.reservedTarget then reserved[#reserved+1]=m end end
 		for _,m in ipairs(scene) do
 			local brick=m.instance
@@ -4101,6 +4300,7 @@ StudioHooks.guard=(function()
 		markPlanProgress(session,index) StudioHooks.recovery.capture(session)
 	end
 	function G.bind(session,index)
+		StudioHooks.runtimeState.touch(session,index)
 		if G.session~=session then G.close() G.session=session end
 		local data=session.blocks[index] local brick=data.placedBrick local old=G.bindings[index]
 		if old and old.brick==brick then return end
@@ -4119,8 +4319,10 @@ StudioHooks.guard=(function()
 		for i,data in ipairs(session.blocks) do if data.guardDamage and not data.skipped and not session.done[i] then G.queue[i]=true end end
 	end
 	function G.scan(limit)
+		local deadline=os.clock()+.0015
 		local session=G.session if not session or not G.enabled then return end
 		for _=1,math.min(limit or 96,#session.blocks) do
+			if os.clock()>=deadline then break end
 			local i=G.cursor G.cursor=i%#session.blocks+1
 			if session.done[i] then G.dirty(session,i) end
 		end
@@ -4167,12 +4369,13 @@ StudioHooks.guard=(function()
 				if holder.creation and holder.creation.initial then reserved[#reserved+1]=holder.creation.initial end
 				for _,old in ipairs(holder.retired or {}) do if old.initial then reserved[#reserved+1]=old.initial end end
 			end
-			for _,data in ipairs(session.blocks) do include(data) for _,h in ipairs(data.work and data.work.helpers or {}) do include(h) end end
+			for i in pairs(StudioHooks.runtimeState.ensure(session).active) do local data=session.blocks[i] include(data) for _,h in ipairs(data.work and data.work.helpers or {}) do include(h) end end
 			if StudioHooks.documents then for _,m in ipairs(StudioHooks.documents.reservations(session)) do reserved[#reserved+1]=m end end
-			G.worldScan={parts=table.clone(StudioHooks.liveWorld.parts(root)),cursor=1,reserved=Planner.spatial(reserved)}
+			G.worldScan={parts=StudioHooks.liveWorld.parts(root),cursor=1,reserved=Planner.spatial(reserved)}
 		end
-		local scan=G.worldScan
+		local scan=G.worldScan local deadline=os.clock()+.0015
 		for _=1,limit or 128 do
+			if os.clock()>=deadline then break end
 			local brick=scan.parts[scan.cursor]
 			if not brick then G.worldScan=nil return end
 			scan.cursor+=1
@@ -4237,14 +4440,19 @@ local function runBuilderEngine(buildString,offset,prepareOnly)
 		if invalid>0 or #blocks==0 then return false,"Некорректные данные постройки" end
 		resumeSession={buildId=PlanLibrary.id(),text=buildString,offset=offset,blocks=blocks,done={},models={},ids={},instances={},nextWorld=0,helpers={},actual={creates=0,shapes=0,deletes=0}}
 		for i,data in ipairs(blocks) do resumeSession.models[i]=targetModel(data,i) end
+		local root=workspace:FindFirstChild("Bricks")
+		if root then StudioHooks.liveWorld.parts(root,function() task.wait() return not cancelled() end) end
+		if cancelled() then return false,"Подготовка индекса остановлена" end
 		StudioHooks.recovery.restore(resumeSession)
 	end
+	if resumeSession.recoveryBlocked then return false,resumeSession.recoveryBlocked end
 	local session=resumeSession
 	if StudioHooks.documents then StudioHooks.documents.stash(session) end
 	session.activeIndex=nil
 	if session.plan and session.plan.plannerVersion~=Planner.version then session.plan=nil session.planByIndex=nil session.previewInvalid=true end
 	session.actionRevision=(session.actionRevision or 0)+1
 	reconcileBuild(session)
+	StudioHooks.runtimeState.rebuild(session)
 	_G.autobuildTotal=#session.blocks _G.autobuildPlaced=0
 	for i,data in ipairs(session.blocks) do
 		if session.done[i] and not matchesAll(data.placedBrick,data) then session.done[i]=nil end
@@ -4292,7 +4500,7 @@ local function runBuilderEngine(buildString,offset,prepareOnly)
 	local function finish(i,data)
 		session.done[i]=true _G.autobuildPlaced+=1 data.failure=nil data.guardDamage=nil data.guardFailures=nil data.guardRetryAt=nil
 		if StudioHooks.guard then StudioHooks.guard.queue[i]=nil StudioHooks.guard.bind(session,i) end
-		StudioHooks.recovery.completed(data) StudioHooks.recovery.capture(session,false) markPlanProgress(session,i)
+		StudioHooks.recovery.completed(data) StudioHooks.recovery.capture(session,false,i) markPlanProgress(session,i)
 		if visualFolder then local visual=visualFolder:FindFirstChild("Visual_"..i) if visual then visual:Destroy() end end
 	end
 	for rank,item in ipairs(session.plan.items) do
@@ -4354,7 +4562,7 @@ local function runBuilderEngine(buildString,offset,prepareOnly)
 	session.queueCreations=nil
 	if StudioHooks.guard then StudioHooks.guard.scan(#session.blocks) StudioHooks.guard.drain(session,4) end
 
-	StudioHooks.recovery.capture(session)
+	StudioHooks.recovery.capture(session,"flush")
 	local skipped=0
 	for _,data in ipairs(session.blocks) do if data.skipped then skipped+=1 end end
 	if _G.autobuildPlaced<#session.blocks then
@@ -4381,7 +4589,7 @@ local function launchAction(forcePreparation)
 	if handles then handles:Destroy() handles=nil end
 	task.spawn(function()
 		local ok,finished,message=pcall(runBuilderEngine,text,offset,prepareOnly)
-		if resumeSession then resumeSession.activeIndex=nil pcall(StudioHooks.recovery.capture,resumeSession) end
+		if resumeSession and not unloaded then resumeSession.activeIndex=nil pcall(StudioHooks.recovery.capture,resumeSession,"flush") end
 		pcall(unlockPosition) pcall(stopToolForcing) pcall(disableNoclip) isBuilding=false
 		if StudioHooks.guard then StudioHooks.guard.autoExecuting=false end
 		if unloaded then return end
@@ -4570,7 +4778,7 @@ return H
 		local ok=pcall(function()
 			writefile(historyFile,HttpService:JSONEncode({version=4,current=snapshot(),undo=History.undo,redo=History.redo}))
 		end)
-		if not ok then setStatus("Вкладки сохранены; история отмены не записана",true) end
+		if not ok then if unloaded then error("История отмены не записана",0) end setStatus("Вкладки сохранены; история отмены не записана",true) end
 	end
 	local function remember()
 		local current=snapshot()
@@ -5917,7 +6125,7 @@ unloadScript = function()
 		for _,session in pairs(StudioHooks.documents.orphans) do include(session) end
 	end
 	for _,session in ipairs(sessions) do
-		step("Состояние работы",function() if StudioHooks.recovery then StudioHooks.recovery.capture(session) end end)
+		step("Состояние работы",function() if StudioHooks.recovery then local saved,message=StudioHooks.recovery.capture(session,"flush") if saved==false then error(message,0) end end end)
 		local function closeHolder(holder)
 			local function disconnect(request)
 				if request and request.connection then step("Ответ создания",function() request.connection:Disconnect() end) end
@@ -5933,7 +6141,7 @@ unloadScript = function()
 	if resumeSession then _G.AUTOBUILD_RESUME={version=2,job=game.JobId,session=resumeSession} end
 	step("Кэш мира",function() if StudioHooks.liveWorld then StudioHooks.liveWorld.close() end end)
 	step("Наблюдение ответов",function() if StudioHooks.recovery then StudioHooks.recovery.close() end end)
-	step("Сохранение вкладок",saveData)
+	step("Сохранение вкладок",function() saveData() if storageError then error(storageError,0) end end)
 	step("Мастерская",function() if StudioHooks.close then StudioHooks.close() end end)
 	for _,conn in ipairs(connections) do step("Обработчик",function() conn:Disconnect() end) end
 	table.clear(connections)
@@ -5951,4 +6159,4 @@ unloadScript = function()
 end
 
 _G.AUTOBUILD_UNLOAD = unloadScript
-setStatus("ORBIT live-13: проверки текущего шага без повторного обхода мира")
+setStatus("ORBIT indexed-14: адресные проверки и полная выгрузка по ×")
