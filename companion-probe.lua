@@ -1,7 +1,7 @@
 -- Read-only observer. Run after ORBIT's R6 companion has been started.
 if _G.ORBIT_COMPANION_PROBE_STOP then pcall(_G.ORBIT_COMPANION_PROBE_STOP) end
 local api=_G.ORBIT_COMPANION_API
-if type(api)~="table" or type(api.snapshot)~="function" then warn("Сначала запусти ORBIT companion-15 и создай двойника.") return end
+if type(api)~="table" or type(api.snapshot)~="function" then warn("Это только тест. Сначала запусти основной ORBIT (main.lua) и создай форму в «Приколы».") return end
 local Players=game:GetService("Players") local RunService=game:GetService("RunService")
 local player=Players.LocalPlayer
 local started=os.clock() local elapsed=0 local samples=0 local worstFrame=0 local frames=0 local totalFrame=0 local worstError=0
@@ -12,11 +12,12 @@ local function stop()
 	if _G.ORBIT_COMPANION_PROBE_STOP==stop then _G.ORBIT_COMPANION_PROBE_STOP=nil end
 	local lines={"ORBIT R6 COMPANION PROBE 1","Read-only; no commands or property changes",string.format("Elapsed=%.2fs samples=%d meanFPS=%.1f worstFrame=%.4fs worstPositionError=%.3f",os.clock()-started,samples,frames>0 and frames/math.max(totalFrame,.0001) or 0,worstFrame,worstError)}
 	if last then
-		lines[#lines+1]="rig="..tostring(last.rig).." running="..tostring(last.running).." busy="..tostring(last.busy).." distance="..tostring(last.distance).." side="..tostring(last.side)
+		lines[#lines+1]="rig="..tostring(last.rig).." preset="..tostring(last.preset).." active="..tostring(last.activeCount).." expected="..tostring(last.expectedCount).." running="..tostring(last.running).." busy="..tostring(last.busy).." distance="..tostring(last.distance).." side="..tostring(last.side)
 		lines[#lines+1]="status="..tostring(last.message)
 		for _,part in ipairs(last.parts or {}) do
 			lines[#lines+1]=part.name.." | own="..tostring(part.own).." present="..tostring(part.present).." anchored="..tostring(part.anchored).." collide="..tostring(part.collide).." color="..tostring(part.color)
 			lines[#lines+1]="  size="..vector(part.size).." pos="..vector(part.pos).." goal="..vector(part.goal)
+			lines[#lines+1]="  localTransparency="..tostring(part.localTransparency).." touch="..tostring(part.touch).." query="..tostring(part.query)
 			lines[#lines+1]="  networkOwner="..tostring(part.networkOwner).." axisError="..tostring(part.axisError).." assemblyRoot="..tostring(part.assemblyRoot).." assemblyAnchored="..tostring(part.assemblyAnchored).." connectedParts="..tostring(part.connected)
 			for property,request in pairs(part.pending or {}) do lines[#lines+1]="  pending "..property.." desired="..tostring(request.desired) end
 		end
