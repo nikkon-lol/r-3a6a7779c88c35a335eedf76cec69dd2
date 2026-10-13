@@ -515,7 +515,7 @@ local function updateDefaultStats()
 end
 
 btnLog.MouseButton1Click:Connect(function()
-	local text="Autobuild Studio v5 / ORBIT · control-8\n"..table.concat(diagnosticLog,"\n")
+	local text="Autobuild Studio v5 / ORBIT · queue-9\n"..table.concat(diagnosticLog,"\n")
 	if storageError then text=text.."\nStorage: "..storageError end
 	if copyText(text) then setStatus("Диагностика скопирована") else setStatus("Буфер обмена недоступен",true) end
 end)
@@ -3187,6 +3187,9 @@ local createOnce=(function()
 		while c.roundAttempts<3 and not cancelled() do
 			if c.attempts>0 then
 				local deadline=c.sentAt+math.max(10,roundTripPing()*8+1)
+				if session.queueCreations and os.clock()<deadline+math.max(.2,roundTripPing()*2) then
+					return nil,"Целевой запрос отложен; сначала продолжаю остальные блоки"
+				end
 				if os.clock()<deadline then
 					local ready=waitUntil(function()
 						folder=getPlayerBricksFolder() or folder found,reason=resolve(c,folder,holder,session)
@@ -3245,9 +3248,33 @@ local createOnce=(function()
 			end,responseTimeout(5))
 			if ready and found then return accept(holder,found,session) end
 			if reason then break end
+			if session.queueCreations then break end
 		end
 		holder.createBlocked=true C.capture(session)
 		return nil,string.format("Блок пока не появился: %s @ %s; попыток %d; RTT×2 %.3fс. Состояние сохранено; продолжение проверит мир и сможет повторить создание.",tostring(c.initial.size),tostring(c.initial.pos),c.attempts,roundTripPing())
+	end
+	function C.nextWake(data,session)
+		local wake
+		local function include(holder)
+			local c=holder.creation
+			if not c or not c.sentAt or (c.attempts or 0)==0 then return end
+			local deadline=c.sentAt+math.max(10,roundTripPing()*8+1)+math.max(.2,roundTripPing()*2)
+			local rounds=c.action==session.actionRevision and (c.roundAttempts or 0) or 0
+			if rounds<3 or os.clock()<deadline then wake=math.min(wake or math.huge,math.max(os.clock(),deadline)) end
+		end
+		include(data) for _,h in ipairs(data.work and data.work.helpers or {}) do include(h) end
+		return wake
+	end
+	function C.arrived(data,session)
+		local folder=getPlayerBricksFolder() if not folder then return false end
+		local function present(holder)
+			local c=holder.creation
+			if c then local part=resolve(c,folder,holder,session) return part~=nil end
+			return false
+		end
+		if present(data) then return true end
+		for _,h in ipairs(data.work and data.work.helpers or {}) do if present(h) then return true end end
+		return false
 	end
 	function C.close()
 		for c in pairs(active) do if c.connection then c.connection:Disconnect() end end table.clear(active)
@@ -3585,6 +3612,7 @@ local function runBuilderEngine(buildString,offset,prepareOnly)
 	task.wait()
 	enableNoclip() startToolForcing()
 	local deferred={}
+	session.queueCreations=true
 	local function finish(i,data)
 		session.done[i]=true _G.autobuildPlaced+=1 data.failure=nil
 		StudioHooks.recovery.completed(data) StudioHooks.recovery.capture(session) markPlanProgress(session,i)
@@ -3602,20 +3630,55 @@ local function runBuilderEngine(buildString,offset,prepareOnly)
 		end
 		if rank%8==0 then task.wait() end
 	end
-	-- One bounded reconciliation pass; an error on one target cannot loop forever.
-	for _,i in ipairs(deferred) do
-		if cancelled() then return false,"Пауза; незавершённые блоки сохранены" end
-		local data=session.blocks[i]
-		if not data.skipped and not session.done[i] then
-			local ok,err=StudioHooks.control.execute(data,i,session)
+	-- Each request owns its retry budget. Poll recent requests together.
+	local visited={} local parked={}
+	while true do
+		local wake
+		for _,i in ipairs(deferred) do
 			if cancelled() then return false,"Пауза; незавершённые блоки сохранены" end
-			if ok then finish(i,data) elseif not data.skipped then setStatus("Блок №"..i..": "..tostring(err),true) end
+			local data=session.blocks[i]
+			if not parked[i] and not data.skipped and not session.done[i] then
+				local due=StudioHooks.recovery.nextWake(data,session)
+				local arrived=StudioHooks.recovery.arrived(data,session)
+				if not visited[i] or arrived or due and due<=os.clock() then
+					visited[i]=true
+					local beforeCreates=session.actual.creates
+					local beforeCreation=data.creation
+					local beforeHelpers=0 for _,h in ipairs(data.work and data.work.helpers or {}) do if h.creation then beforeHelpers+=1 end end
+					local ok,err=StudioHooks.control.execute(data,i,session)
+					if cancelled() then return false,"Пауза; незавершённые блоки сохранены" end
+					if ok then finish(i,data) elseif not data.skipped then setStatus("Блок №"..i..": "..tostring(err),true) end
+					local afterHelpers=0 for _,h in ipairs(data.work and data.work.helpers or {}) do if h.creation then afterHelpers+=1 end end
+					if not ok and beforeCreates==session.actual.creates and beforeCreation==data.creation and beforeHelpers==afterHelpers and (arrived or due and due<=os.clock() or data.repairRequested) then
+						parked[i]=true -- Geometry/repair cannot progress; keep its requests, never spin on this target.
+					end
+				end
+				if not parked[i] and not data.skipped and not session.done[i] then
+					due=StudioHooks.recovery.nextWake(data,session)
+					if due then wake=math.min(wake or math.huge,due) end
+				end
+			end
 		end
+		if not wake then break end
+		setStatus("Доступные блоки пройдены. Сверяю очередь целевых запросов.")
+		if not waitUntil(function()
+			if os.clock()>=wake then return true end
+			local waiting=false
+			for _,i in ipairs(deferred) do
+				local d=session.blocks[i]
+				if not parked[i] and not d.skipped and not session.done[i] then
+					waiting=true if StudioHooks.recovery.arrived(d,session) then return true end
+				end
+			end
+			return not waiting
+		end,math.max(.1,wake-os.clock()+.1)) then return false,"Пауза; очередь сохранена" end
 	end
+	session.queueCreations=nil
+
 	local skipped=0
 	for _,data in ipairs(session.blocks) do if data.skipped then skipped+=1 end end
 	if _G.autobuildPlaced<#session.blocks then
-		return false,string.format("Готово %d/%d · пропущено %d. Можно продолжить или переделать проблемный блок.",_G.autobuildPlaced,#session.blocks,skipped)
+		return false,string.format("Обход завершён: готово %d/%d · пропущено %d · ожидают восстановления %d. Продолжить / переделать проблемный блок.",_G.autobuildPlaced,#session.blocks,skipped,#session.blocks-_G.autobuildPlaced-skipped)
 	end
 	return true,string.format("Готово: %d блоков · созданий %d · изменений граней %d · удалений временных %d",#session.blocks,session.actual.creates,session.actual.shapes,session.actual.deletes)
 end
@@ -5124,4 +5187,4 @@ unloadScript = function()
 end
 
 _G.AUTOBUILD_UNLOAD = unloadScript
-setStatus("ORBIT control-8: пропуск, переделка и продолжение после ошибки блока")
+setStatus("ORBIT queue-9: отдельная очередь целевых запросов, без общего лимита ошибок")
