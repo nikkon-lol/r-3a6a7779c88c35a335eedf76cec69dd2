@@ -785,7 +785,7 @@ local function updateDefaultStats()
 end
 
 btnLog.MouseButton1Click:Connect(function()
-	local text="Autobuild Studio v5 / ORBIT · documents-11\n"..table.concat(diagnosticLog,"\n")
+	local text="Autobuild Studio v5 / ORBIT · live-13\n"..table.concat(diagnosticLog,"\n")
 	if storageError then text=text.."\nStorage: "..storageError end
 	if copyText(text) then setStatus("Диагностика скопирована") else setStatus("Буфер обмена недоступен",true) end
 end)
@@ -2478,15 +2478,67 @@ local function readSprays(brick)
 	end
 	return sprays
 end
-local function snapshotWorld(session,geometryOnly)
+-- Cache membership only. Geometry/properties are read live before each action.
+StudioHooks.liveWorld=(function()
+	local W={}
+	local root,parts,positions,added,removing
+	local function close()
+		if added then added:Disconnect() added=nil end
+		if removing then removing:Disconnect() removing=nil end
+		root=nil parts=nil positions=nil
+	end
+	function W.parts(folder)
+		if not folder then return {} end
+		-- Test/older environments without descendant events use a fresh snapshot.
+		if not folder.DescendantAdded or not folder.DescendantRemoving then return folder:GetDescendants() end
+		if root~=folder then
+			close() root=folder parts={} positions={}
+			local function add(part)
+				if part:IsA("BasePart") and not positions[part] then parts[#parts+1]=part positions[part]=#parts end
+			end
+			added=trackConn(folder.DescendantAdded:Connect(add))
+			removing=trackConn(folder.DescendantRemoving:Connect(function(part)
+				local index=positions[part] if not index then return end
+				local last=parts[#parts] parts[index]=last parts[#parts]=nil positions[part]=nil
+				if last~=part then positions[last]=index end
+			end))
+			for _,part in ipairs(folder:GetDescendants()) do add(part) end
+		end
+		return parts
+	end
+	function W.focus(...)
+		local lo,hi
+		for _,model in ipairs({...}) do if model and model.pos and model.size then
+			local a,b=model.pos-model.size/2,model.pos+model.size/2
+			lo=lo and Vector3.new(math.min(lo.X,a.X),math.min(lo.Y,a.Y),math.min(lo.Z,a.Z)) or a
+			hi=hi and Vector3.new(math.max(hi.X,b.X),math.max(hi.Y,b.Y),math.max(hi.Z,b.Z)) or b
+		end end
+		return lo and {pos=(lo+hi)/2,size=hi-lo+Vector3.new(.1,.1,.1)} or nil
+	end
+	function W.near(part,focus)
+		if not focus then return true end
+		-- A circumscribed sphere covers rotated, non-queryable and hollow parts.
+		local delta=part.Position-focus.pos local half=focus.size/2
+		local x=math.max(0,math.abs(delta.X)-half.X)
+		local y=math.max(0,math.abs(delta.Y)-half.Y)
+		local z=math.max(0,math.abs(delta.Z)-half.Z)
+		local size=part.Size
+		return x*x+y*y+z*z<=(size.X*size.X+size.Y*size.Y+size.Z*size.Z)/4+.01
+	end
+	W.close=close
+	return W
+end)()
+
+local function snapshotWorld(session,geometryOnly,focus)
 	local result,sources={},{}
 	local unfinished={}
 	for i,data in ipairs(session.blocks) do if not session.done[i] and data.placedBrick then unfinished[data.placedBrick]=true end end
 	local own=getPlayerBricksFolder()
 	local root=workspace:FindFirstChild("Bricks")
-	if not root then return result,sources end
-	for _,brick in ipairs(root:GetDescendants()) do
-		if brick:IsA("BasePart") and brick.Name=="Brick" then
+	if not root then result.liveFocus=focus
+	return result,sources end
+	for _,brick in ipairs(StudioHooks.liveWorld.parts(root)) do
+		if brick:IsA("BasePart") and brick.Name=="Brick" and brick.Parent and StudioHooks.liveWorld.near(brick,focus) then
 			local cf,size=brick.CFrame,brick.Size
 			local identity=(cf.RightVector-Vector3.new(1,0,0)).Magnitude<.001 and (cf.UpVector-Vector3.new(0,1,0)).Magnitude<.001
 			local worldSize=Vector3.new(math.abs(cf.RightVector.X)*size.X+math.abs(cf.UpVector.X)*size.Y+math.abs(cf.LookVector.X)*size.Z,math.abs(cf.RightVector.Y)*size.X+math.abs(cf.UpVector.Y)*size.Y+math.abs(cf.LookVector.Y)*size.Z,math.abs(cf.RightVector.Z)*size.X+math.abs(cf.UpVector.Z)*size.Y+math.abs(cf.LookVector.Z)*size.Z)
@@ -2517,6 +2569,7 @@ local function snapshotWorld(session,geometryOnly)
 		for _,mask in ipairs(masks) do result[#result+1]=mask end
 		for n=#sources,1,-1 do for _,mask in ipairs(masks) do if Planner.intersects(sources[n],mask) then sources[n].eligible=false table.remove(sources,n) break end end end
 	end
+	result.liveFocus=focus
 	return result,sources
 end
 local function planVector(v) return {v.X,v.Y,v.Z} end
@@ -3314,11 +3367,11 @@ local createOnce=(function()
 		if c then value.creation={initial=packedBox(c.initial),mode=c.mode,face=FaceSymbols[c.face],clone=c.expectedClone==true,beforeCount=c.beforeCount or 0,attempts=c.attempts or 1,sentUnix=c.sentUnix,source= c.source and c.source.Parent and packedSource(instanceModel(c.source,"checkpoint")) or nil} end
 		return value
 	end
-	function C.capture(session)
+	function C.capture(session,persist)
 		local manifestFile,stateFile=manifestFile,stateFile
 		if StudioHooks.documents then manifestFile,stateFile=StudioHooks.documents.paths(session,true) end
 		_G.AUTOBUILD_RESUME={version=2,job=game.JobId,session=session}
-		if not writefile then return end
+		if persist==false or not writefile then return end
 		local records={}
 		local controls={}
 		for index,data in ipairs(session.blocks) do
@@ -3453,7 +3506,7 @@ local createOnce=(function()
 	local function accept(holder,part,session)
 		local c=holder.creation c.connection:Disconnect() active[c]=nil holder.creation=nil holder.brick=part holder.createBlocked=nil
 		if c.sentAt and c.attempts==1 then StudioHooks.timing.observed("create",os.clock()-c.sentAt) end
-		C.capture(session) return part
+		C.capture(session,false) return part
 	end
 	function C.inspect(holder,session)
 		local folder=getPlayerBricksFolder() if not folder then return false,"Нет вашей папки блоков" end
@@ -3542,11 +3595,11 @@ local createOnce=(function()
 			if not currentSource and c.mode=="detailed" then input+=CONFIG.DETAILED_INPUT_OFFSET end
 			if not ensureNear(input,currentSource and currentSource.Position or nil,c.attempts>0) then break end
 			found,reason=resolve(c,folder,holder,session) if found then return accept(holder,found,session) end
-			local obstacles=snapshotWorld(session)
+			local obstacles=snapshotWorld(session,true,c.initial)
 			if StudioHooks.guard then
 				local cleared,changed=StudioHooks.guard.clearBox(session,c.initial,currentSource,obstacles)
 				if not cleared then holder.createBlocked=true return nil,changed end
-				if changed then obstacles=snapshotWorld(session) end
+				if changed then obstacles=snapshotWorld(session,true,c.initial) end
 			end
 			for n=#obstacles,1,-1 do if obstacles[n].reservedHolder==holder then table.remove(obstacles,n) end end
 			if not Planner.safeBox(c.initial,holder.finalModel or c.initial,obstacles,nil,holder.temporary==true) then break end
@@ -3620,17 +3673,17 @@ local function boundaryEdit(brick,target,session,data)
 	end
 	if (brick.Position-target.pos).Magnitude<.03 and (brick.Size-target.size).Magnitude<.03 then return true end
 	local partial=instanceModel(brick,session.ids[brick] or "partial")
-	local obstacles=snapshotWorld(session,true)
+	local obstacles=snapshotWorld(session,true,StudioHooks.liveWorld.focus(target,partial))
 	local recipe=Planner.chooseLive(target,{},obstacles,session.models,false,partial)
 	if not recipe then return false,"Нельзя безопасно изменить границы текущего блока" end
 	for _,step in ipairs(recipe.steps) do
 		if cancelled() then return false,"Пауза" end
 		if (brick.Position-step.before.pos).Magnitude>.03 or (brick.Size-step.before.size).Magnitude>.03 then return false,"Блок изменился до шага ресайза" end
-		local scene=snapshotWorld(session,true)
+		local scene=snapshotWorld(session,true,step.after)
 		if StudioHooks.guard then
 			local cleared,changed=StudioHooks.guard.clearBox(session,step.after,brick,scene)
 			if not cleared then return false,changed end
-			if changed then scene=snapshotWorld(session,true) end
+			if changed then scene=snapshotWorld(session,true,step.after) end
 		end
 		if not Planner.safeBox(step.after,target,scene,session.ids[brick],false) then return false,"Путь изменения грани занят другим блоком" end
 		if not ensureNear(brick.Position) then return false,"Персонаж недоступен для ресайза" end
@@ -3700,9 +3753,15 @@ local function executeBlock(data,index,session)
 		data.work=data.work or {recipe={kind="reuse",target=target},helpers={}}
 	end
 	if not data.work then
-		local obstacles,sources=snapshotWorld(session)
 		local reviewed=session.planByIndex[index]
-		local recipe=Planner.reviewLive(reviewed,target,sources,obstacles,session.models) or Planner.chooseLive(target,sources,obstacles,session.models,reviewed.kind=="bridge" and findTool("Delete")~=nil)
+		local focus=StudioHooks.liveWorld.focus(target,reviewed.initial,reviewed.source)
+		for _,helper in ipairs(reviewed.helpers or {}) do focus=StudioHooks.liveWorld.focus(focus,helper) end
+		local obstacles,sources=snapshotWorld(session,false,focus)
+		local recipe=Planner.reviewLive(reviewed,target,sources,obstacles,session.models)
+		if not recipe then
+			obstacles,sources=snapshotWorld(session)
+			recipe=Planner.chooseLive(target,sources,obstacles,session.models,reviewed.kind=="bridge" and findTool("Delete")~=nil)
+		end
 		if not recipe then return false,"Нет безопасного способа создания блока "..index end
 		if recipe.kind=="bridge" then
 			local unchanged=#recipe.helpers==#reviewed.helpers
@@ -3942,8 +4001,8 @@ StudioHooks.guard=(function()
 	end
 	function G.extendScene(session,scene)
 		local root=workspace:FindFirstChild("Bricks") if not root then return scene end
-		for _,brick in ipairs(root:GetDescendants()) do
-			if brick:IsA("BasePart") and brick.Name~="Brick" then
+		for _,brick in ipairs(StudioHooks.liveWorld.parts(root)) do
+			if brick:IsA("BasePart") and brick.Name~="Brick" and brick.Parent and StudioHooks.liveWorld.near(brick,scene.liveFocus) then
 				local m=G.worldBox(brick)
 				if not session.ids[brick] then session.nextWorld+=1 session.ids[brick]="w:"..session.nextWorld end
 				m.id=session.ids[brick] scene[#scene+1]=m
@@ -4110,7 +4169,7 @@ StudioHooks.guard=(function()
 			end
 			for _,data in ipairs(session.blocks) do include(data) for _,h in ipairs(data.work and data.work.helpers or {}) do include(h) end end
 			if StudioHooks.documents then for _,m in ipairs(StudioHooks.documents.reservations(session)) do reserved[#reserved+1]=m end end
-			G.worldScan={parts=root:GetDescendants(),cursor=1,reserved=Planner.spatial(reserved)}
+			G.worldScan={parts=table.clone(StudioHooks.liveWorld.parts(root)),cursor=1,reserved=Planner.spatial(reserved)}
 		end
 		local scan=G.worldScan
 		for _=1,limit or 128 do
@@ -4233,7 +4292,7 @@ local function runBuilderEngine(buildString,offset,prepareOnly)
 	local function finish(i,data)
 		session.done[i]=true _G.autobuildPlaced+=1 data.failure=nil data.guardDamage=nil data.guardFailures=nil data.guardRetryAt=nil
 		if StudioHooks.guard then StudioHooks.guard.queue[i]=nil StudioHooks.guard.bind(session,i) end
-		StudioHooks.recovery.completed(data) StudioHooks.recovery.capture(session) markPlanProgress(session,i)
+		StudioHooks.recovery.completed(data) StudioHooks.recovery.capture(session,false) markPlanProgress(session,i)
 		if visualFolder then local visual=visualFolder:FindFirstChild("Visual_"..i) if visual then visual:Destroy() end end
 	end
 	for rank,item in ipairs(session.plan.items) do
@@ -4295,6 +4354,7 @@ local function runBuilderEngine(buildString,offset,prepareOnly)
 	session.queueCreations=nil
 	if StudioHooks.guard then StudioHooks.guard.scan(#session.blocks) StudioHooks.guard.drain(session,4) end
 
+	StudioHooks.recovery.capture(session)
 	local skipped=0
 	for _,data in ipairs(session.blocks) do if data.skipped then skipped+=1 end end
 	if _G.autobuildPlaced<#session.blocks then
@@ -4321,7 +4381,7 @@ local function launchAction(forcePreparation)
 	if handles then handles:Destroy() handles=nil end
 	task.spawn(function()
 		local ok,finished,message=pcall(runBuilderEngine,text,offset,prepareOnly)
-		if resumeSession then resumeSession.activeIndex=nil end
+		if resumeSession then resumeSession.activeIndex=nil pcall(StudioHooks.recovery.capture,resumeSession) end
 		pcall(unlockPosition) pcall(stopToolForcing) pcall(disableNoclip) isBuilding=false
 		if StudioHooks.guard then StudioHooks.guard.autoExecuting=false end
 		if unloaded then return end
@@ -5871,6 +5931,7 @@ unloadScript = function()
 		end
 	end
 	if resumeSession then _G.AUTOBUILD_RESUME={version=2,job=game.JobId,session=resumeSession} end
+	step("Кэш мира",function() if StudioHooks.liveWorld then StudioHooks.liveWorld.close() end end)
 	step("Наблюдение ответов",function() if StudioHooks.recovery then StudioHooks.recovery.close() end end)
 	step("Сохранение вкладок",saveData)
 	step("Мастерская",function() if StudioHooks.close then StudioHooks.close() end end)
@@ -5890,4 +5951,4 @@ unloadScript = function()
 end
 
 _G.AUTOBUILD_UNLOAD = unloadScript
-setStatus("ORBIT documents-11: отдельные файлы построек, страницы кода и независимые вкладки")
+setStatus("ORBIT live-13: проверки текущего шага без повторного обхода мира")
