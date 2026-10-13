@@ -795,7 +795,7 @@ local function updateDefaultStats()
 end
 
 btnLog.MouseButton1Click:Connect(function()
-	local text="Autobuild Studio v5 / ORBIT · forms-16\n"..table.concat(diagnosticLog,"\n")
+	local text="Autobuild Studio v5 / ORBIT · stairwell-18\n"..table.concat(diagnosticLog,"\n")
 	if storageError then text=text.."\nStorage: "..storageError end
 	if copyText(text) then setStatus("Диагностика скопирована") else setStatus("Буфер обмена недоступен",true) end
 end)
@@ -3043,7 +3043,15 @@ function PlanLibrary.order(stored,targets)
 end
 function PlanLibrary.prepare(targets,scene,options)
 	local selected=PlanLibrary.selection()
-	if selected=="auto" then return Planner.prepare(targets,scene,options) end
+	if selected=="auto" then
+		local id=PlanLibrary.id()
+		if type(id)=="string" and id:sub(1,10)=="stairwell_" then
+			local order={} for i in ipairs(targets) do order[i]=i end
+			local plan=Planner.prepareOrdered(targets,scene,options,order)
+			plan.name="Stairwell · этажи по порядку" plan.stairwell=true return plan
+		end
+		return Planner.prepare(targets,scene,options)
+	end
 	local stored=readStored(selected)
 	local order,description
 	if stored then order,description=PlanLibrary.order(stored,targets) end
@@ -4212,7 +4220,9 @@ StudioHooks.guard=(function()
 		end
 		return scene
 	end
+	function G.preserve(session) return session and type(session.buildId)=="string" and session.buildId:sub(1,10)=="stairwell_" end
 	function G.planScene(session,scene)
+		if G.preserve(session) then return G.extendScene(session,scene) end
 		if not G.clear then return scene end
 		scene=G.extendScene(session,scene)
 		local index=Planner.spatial(session.models) local result={}
@@ -4251,6 +4261,13 @@ StudioHooks.guard=(function()
 		end
 	end
 	function G.clearBox(session,box,exclude,scene)
+		if G.preserve(session) then
+			local root=workspace:FindFirstChild("Bricks")
+			if root then for _,brick in ipairs(StudioHooks.liveWorld.query(root,box)) do
+				if brick.Parent and brick~=exclude and not G.protected(session,brick) and G.intersects(brick,box) then return false,"Существующая постройка перекрыла Stairwell · удаление отключено" end
+			end end
+			return true,false
+		end
 		if not G.clear then return true,false end
 		local changed=false local root=workspace:FindFirstChild("Bricks")
 		if not root then return true,false end
@@ -4575,6 +4592,7 @@ local function runBuilderEngine(buildString,offset,prepareOnly)
 	return true,string.format("Готово: %d блоков · созданий %d · изменений граней %d · удалений временных %d",#session.blocks,session.actual.creates,session.actual.shapes,session.actual.deletes)
 end
 local function launchAction(forcePreparation)
+	if StudioHooks.stairwell and StudioHooks.stairwell.busy then setStatus("Дождись расчёта Stairwell",true) return end
 	if StudioHooks.extras and (StudioHooks.extras.running or StudioHooks.extras.busy) then setStatus("Сначала останови двойника",true) return end
 	if busySaving then setStatus("Дождитесь сохранения") return end
 	if isBuilding then _G.stopautobuild=true btnStart.Text="ОСТАНОВКА…" setStatus("Останавливаю; отправленный запрос может завершиться") return end
@@ -4632,6 +4650,56 @@ StudioHooks.extras=(function()
 	local function limbColor(preset,part)
 		return preset=="golem" and Color3.new(137/255,145/255,156/255) or part.Color
 	end
+	-- Proximity is automatic on the server. This layer prevents avoidable loss;
+	-- it never claims that a client can pin a server's network owner.
+	E.network=(function()
+		local N={guard=true,players={},lastPlayers=-math.huge,lost=0,known=0,owned=0,lossEvents=0,recovered=0,states={}}
+		function N.begin() N.lost=0 N.known=0 N.owned=0 N.lossEvents=0 N.recovered=0 N.states={} end
+		function N.observe(part)
+			local ok,owned=false,nil
+			if type(isnetworkowner)=="function" then ok,owned=pcall(isnetworkowner,part) end
+			if not ok or type(owned)~="boolean" then return nil end
+			N.known+=1 if owned then N.owned+=1 else N.lost+=1 end
+			local previous=N.states[part]
+			if previous==true and not owned then N.lossEvents+=1 elseif previous==false and owned then N.recovered+=1 end
+			N.states[part]=owned return owned
+		end
+		function N.distance(body)
+			local requested=E.distance local safe=requested N.nearest=nil
+			if not N.guard then E.effectiveDistance=requested return requested end
+			local now=os.clock()
+			if now-N.lastPlayers>=1 then
+				N.lastPlayers=now local ok,list=pcall(function() return Players:GetPlayers() end)
+				if ok and type(list)=="table" then N.players=list else N.players={} end
+			end
+			local radius=4*E.presets[E.preset].scale
+			for _,player in ipairs(N.players) do if player~=LocalPlayer then
+				local char=player.Character local root=char and char:FindFirstChild("HumanoidRootPart")
+				if root and root.Parent then
+					local distance=(root.Position-body.root.Position).Magnitude
+					N.nearest=N.nearest and math.min(N.nearest,distance) or distance
+					local velocity=root.AssemblyLinearVelocity local speed=velocity and velocity.Magnitude or 16
+					local margin=3+math.clamp((getSafePing()*2+.25)*math.max(16,speed),2,12)
+					safe=math.min(safe,math.max(0,distance*.5-radius-margin))
+				end
+			end end
+			if N.lost>0 then safe=0 end
+			E.effectiveDistance=safe return safe
+		end
+		function N.summary()
+			local actual=E.effectiveDistance or E.distance
+			local text=string.format("%d/%d · отступ %.1f / %.1f",E.activeCount or 0,E.data and #E.data.records or 0,actual,E.distance)
+			if N.known>0 then text..=string.format(" · контроль %d/%d",N.owned,N.known) end
+			if N.lost>0 then text..=" · потерян: нажми «Вернуть контроль»" end
+			return text
+		end
+		return N
+	end)()
+	function E.setNetworkGuard(value)
+		E.network.guard=value==true E.effectiveDistance=E.distance E.save()
+		return true
+	end
+
 	local stateFile="OrbitCompanion.json"
 	local function say(message,failure)
 		E.message=message
@@ -4672,7 +4740,7 @@ StudioHooks.extras=(function()
 	end
 	function E.save()
 		if not writefile then return false,"Нет записи файлов" end
-		local payload={version=2,distance=E.distance,side=E.side,preset=E.preset,job=game.JobId,models={}}
+		local payload={version=2,distance=E.distance,side=E.side,preset=E.preset,networkGuard=E.network.guard,job=game.JobId,models={}}
 		for preset,data in pairs(E.models) do
 			local saved={token=data.token,stageId=data.stageId,code=data.code,records={}}
 			for i,record in ipairs(data.records) do saved.records[i]={name=record.name,neutral=serializeBlock(model(data.rows[i])),pending=record.pending,original=record.original} end
@@ -4718,6 +4786,7 @@ StudioHooks.extras=(function()
 		local saved=HttpService:JSONDecode(readfile(stateFile)) if type(saved)~="table" or saved.version~=1 and saved.version~=2 then return end
 		if type(saved.distance)=="number" and saved.distance==saved.distance then E.distance=math.clamp(saved.distance,0,64) end
 		if ({back=true,front=true,left=true,right=true})[saved.side] then E.side=saved.side end
+		if type(saved.networkGuard)=="boolean" then E.network.guard=saved.networkGuard end
 		if saved.version==2 and E.presets[saved.preset] then E.preset=saved.preset end
 		if saved.job~=game.JobId then return end
 		if saved.version==1 then if not E.models.r6 then loadModel(saved,"r6") end
@@ -4729,7 +4798,8 @@ StudioHooks.extras=(function()
 	_G.ORBIT_COMPANION_STATE=E.data
 	if E.data then E.message="Форма сохранена · запусти или припаркуй блоки" end
 	function E.setPreset(preset)
-		if not E.presets[preset] or E.busy or E.running or _G.autobuildRunning or unloaded then say("Сначала останови двойника и текущую операцию",true) return false end
+		local stopping=E.busy and E.stopRequested
+		if not E.presets[preset] or E.busy and not stopping or E.running or _G.autobuildRunning and not stopping or unloaded then say("Сначала останови двойника и текущую операцию",true) return false end
 		E.preset=preset E.data=E.models[preset] _G.ORBIT_COMPANION_STATE=E.data _G.ORBIT_COMPANION_MODELS.preset=preset E.save()
 		say(E.presets[preset].name.." · "..E.presets[preset].count.." деталей") return true
 	end
@@ -4748,7 +4818,7 @@ StudioHooks.extras=(function()
 		return not interrupted() and predicate()
 	end
 	local function release()
-		E.running=false E.rootPose=nil E.parked=false E.activeCount=0
+		E.running=false E.rootPose=nil E.parked=false E.activeCount=0 E.fixedTargets=nil
 		if E.connection then E.connection:Disconnect() E.connection=nil end
 		for _,connection in ipairs(E.characterConnections or {}) do connection:Disconnect() end
 		for part,look in pairs(E.characterParts) do if part.Parent then pcall(function() part.LocalTransparencyModifier=look.transparency end) end end
@@ -4813,11 +4883,11 @@ StudioHooks.extras=(function()
 		end
 		local look=part and E.localLook[part]
 		if look and part.Parent then pcall(function() part.LocalTransparencyModifier=look.transparency part.CanTouch=look.touch part.CanQuery=look.query end) end
-		if part then E.localLook[part]=nil E.byPart[part]=nil end
+		if part then E.localLook[part]=nil E.byPart[part]=nil E.network.states[part]=nil end
 		record.part=nil record.pending={} record.original=nil
 	end
 	local function desiredRoot(root)
-		local d=E.distance local lift=3*(E.presets[E.preset].scale-1)
+		local d=E.effectiveDistance or E.distance local lift=3*(E.presets[E.preset].scale-1)
 		local offset=E.side=="front" and Vector3.new(0,lift,-d) or E.side=="left" and Vector3.new(-d,lift,0) or E.side=="right" and Vector3.new(d,lift,0) or Vector3.new(0,lift,d)
 		return root*CFrame.new(offset)
 	end
@@ -4858,7 +4928,7 @@ StudioHooks.extras=(function()
 	local function checked(result,message) if not result then error(message or "Действие не подтверждено",0) end end
 	local function upgradeHead()
 		if E.preset~="r6" then return end
-		local row=E.data.rows[1] local record=E.data.records[1] local part=record.part
+		local data=E.data local row=data.rows[1] local record=data.records[1] local part=record.part
 		if row.size==Vector3.new(1,1,1) then return end
 		checked(row.size==Vector3.new(2,1,1) and validRecord(record),"Не удалось обновить старую голову")
 		local after={pos=row.pos-Vector3.new(.5,0,0),size=Vector3.new(1,1,1)}
@@ -4878,26 +4948,30 @@ StudioHooks.extras=(function()
 			tool.event:FireServer(part,Enum.NormalId.Right,hrp.Position,"decrease")
 		end
 		checked(waitFor(function() return validRecord(record) and (part.Size-after.size).Magnitude<.03 and (part.Position-after.pos).Magnitude<.03 end,responseTimeout(5)),"Уменьшение головы не подтверждено; повтор не отправлен")
-		row.pos=after.pos row.size=after.size record.pending.HeadResize=nil E.data.code=code(E.data.rows) E.save()
-		if StudioHooks.stageCompanion then StudioHooks.stageCompanion(E.data.code,E.data.stageId,E.presets[E.preset].name) end
+		checked(not interrupted() and E.data==data,"Прежняя модель отменена")
+		row.pos=after.pos row.size=after.size record.pending.HeadResize=nil data.code=code(data.rows) E.save()
+		if StudioHooks.stageCompanion then StudioHooks.stageCompanion(data.code,data.stageId,E.presets[E.preset].name) end
 	end
 	local function activate(body)
+		local data=E.data
 		local current=avatar()
 		checked(current and current.char==body.char,"Персонаж сменился · запусти двойника снова")
 		body=current
+		E.network.begin() E.network.distance(body)
 		watchCharacter(body.char) upgradeHead()
-		for i,record in ipairs(E.data.records) do
+		for i,record in ipairs(data.records) do
+			checked(not interrupted() and E.data==data,"Прежняя модель отменена")
 			checked(validRecord(record),"Не хватает детали выбранной формы")
-			checked((record.part.Size-E.data.rows[i].size).Magnitude<.05,"Размер блока двойника изменён")
+			checked((record.part.Size-data.rows[i].size).Magnitude<.05,"Размер блока двойника изменён")
 			record.original=record.original or {collide=record.part.CanCollide,touch=record.part.CanTouch}
-			pose(record,CFrame.new(E.data.rows[i].pos))
+			pose(record,CFrame.new(data.rows[i].pos))
 			checked(toggle(record,"CanCollide",false))
 			checked(toggle(record,"Anchored",false))
-			local row=E.data.rows[i] local wanted=model(row) wanted.color=limbColor(E.preset,body[row.role])
+			local row=data.rows[i] local wanted=model(row) wanted.color=limbColor(E.preset,body[row.role])
 			checked(paintBlock(record.part,wanted),"Цвет конечности не подтверждён")
 		end
 		-- Unlock before capturing the following target; building temporarily moves us.
-		checked(not interrupted(),"Действие остановлено")
+		checked(not interrupted() and E.data==data,"Действие остановлено")
 		unlockPosition() stopToolForcing() disableNoclip()
 		E.running=true E.cancel=false E.sourceCharacter=body.char E.rootPose=nil
 		E.syncAvatar()
@@ -4908,21 +4982,23 @@ StudioHooks.extras=(function()
 			local current=avatar()
 			if not current or current.char~=E.sourceCharacter then release() E.save() say("Персонаж сменился · верни блоки или запусти снова",true) return end
 			local ok,err=pcall(function()
-				E.syncAvatar() local targets=E.targets(current,step) E.maxError=0 E.ownedCount=0 E.activeCount=0 local removed=false
+				E.syncAvatar() E.network.distance(current)
+				local targets=E.fixedTargets or E.targets(current,step) E.maxError=0 E.ownedCount=0 E.activeCount=0 local removed=false
+				E.network.lost=0 E.network.known=0 E.network.owned=0
 				for i,record in ipairs(E.data.records) do
 					if not validRecord(record) then
 						if record.part or next(record.pending or {}) then forgetMissing(record) removed=true end
 					else
 						checked((record.part.Size-E.data.rows[i].size).Magnitude<.05,"Изменился размер блока")
 						pose(record,targets[i]) E.activeCount+=1 E.maxError=math.max(E.maxError,(record.part.Position-targets[i].Position).Magnitude)
-						if isnetworkowner then local available,owned=pcall(isnetworkowner,record.part) if available and owned then E.ownedCount+=1 end end
+						if E.network.observe(record.part) then E.ownedCount+=1 end
 					end
 				end
 				if removed then E.save() end
 				if E.activeCount==0 then release() say("Пул пуст · все детали отвязаны") end
 			end)
 			if not ok then release() E.save() say(tostring(err),true) return end
-			reportAt+=step if E.running and reportAt>=.5 then reportAt=0 if StudioHooks.extraStatus then StudioHooks.extraStatus(string.format("Следует · %d/%d · %.0f стад. · погрешность %.1f",E.activeCount or 0,#E.data.records,E.distance,E.maxError or 0)) end end
+			reportAt+=step if E.running and reportAt>=.5 then reportAt=0 if StudioHooks.extraStatus then StudioHooks.extraStatus("Следует · "..E.network.summary()) end end
 		end)
 		E.save() say("Двойник следует и повторяет позы R6")
 	end
@@ -4933,22 +5009,56 @@ StudioHooks.extras=(function()
 		E.busy=true E.cancel=false E.stopRequested=false _G.stopautobuild=false _G.autobuildRunning=true isBuilding=true textBox.TextEditable=false
 		task.spawn(function()
 			local ok,err=pcall(function() enableNoclip() startToolForcing() action() end)
+			E.fixedTargets=nil E.reclaiming=false
 			if not ok then release() end
 			pcall(unlockPosition) pcall(stopToolForcing) pcall(disableNoclip) isBuilding=false E.busy=false
 			if unloaded then return end
 			if E.returnRoot and E.returnRoot.Parent and LocalPlayer.Character==character then E.returnRoot.CFrame=E.returnPose end
 			E.returnRoot=nil E.returnPose=nil
 			_G.autobuildRunning=false textBox.TextEditable=true
-			if resumeSession then pcall(StudioHooks.recovery.capture,resumeSession,"flush") end
+			if resumeSession and not E.stopRequested then pcall(StudioHooks.recovery.capture,resumeSession,"flush") end
 			E.save() if E.stopRequested then say("Остановлен · управление и старый пул отвязаны") elseif not ok then say(tostring(err),true) end
 			if StudioHooks.documents then StudioHooks.documents.flushUI() end
+			if E.nextCreate and not unloaded then E.nextCreate=nil task.defer(function() E.create(true) end) end
 		end)
 		return true
+	end
+	function E.reclaim()
+		if not E.running or E.busy or _G.autobuildRunning or unloaded then say("Сначала запусти форму и дождись текущей операции",true) return false end
+		local body,err=avatar() if not body then say(err,true) return false end
+		local root=body.root local original=root.CFrame local data=E.data
+		E.rootPose=nil E.effectiveDistance=0
+		local targets=E.targets(body,1)
+		return runAction(function()
+			E.fixedTargets=targets E.reclaiming=true
+			say("Возвращаю контроль · временно подхожу к своим деталям")
+			local deadline=os.clock()+8 local recovered,failed=0,0
+			for i,record in ipairs(data.records) do
+				if interrupted() or not E.running or os.clock()>=deadline then break end
+				if validRecord(record) and ((record.part.Position-targets[i].Position).Magnitude>1 or E.network.states[record.part]==false) then
+					local part=record.part local remaining=math.min(2.5,deadline-os.clock())
+					local ok=waitFor(function()
+						if not E.running or LocalPlayer.Character~=body.char or not root.Parent or not validRecord(record) then return true end
+						root.CFrame=CFrame.new(part.Position+Vector3.new(0,.15,0))*original.Rotation
+						pose(record,targets[i])
+						local control=true
+						if type(isnetworkowner)=="function" then local available,value=pcall(isnetworkowner,part) if available then control=value==true end end
+						return control and (part.Position-targets[i].Position).Magnitude<1
+					end,remaining)
+					if ok and validRecord(record) and (part.Position-targets[i].Position).Magnitude<1 then recovered+=1 else failed+=1 end
+				end
+			end
+			if root.Parent and LocalPlayer.Character==body.char then root.CFrame=original end
+			E.rootPose=nil E.network.lost=0 E.network.known=0 E.network.owned=0
+			local remaining=0
+			for i,record in ipairs(data.records) do if validRecord(record) then E.network.observe(record.part) if (record.part.Position-targets[i].Position).Magnitude>=1 then remaining+=1 end end end
+			say(string.format("Возврат контроля · поднято %d · не дошло %d · без контроля %d",recovered,remaining,E.network.lost),failed>0 or remaining>0 or E.network.lost>0)
+		end)
 	end
 	local function newData(body)
 		local origin=body.root.Position local rows local specs=definitions(E.preset,body) local profile=E.presets[E.preset]
 		local root=workspace:FindFirstChild("Bricks")
-		for _,shift in ipairs({Vector3.new(8,0,8),Vector3.new(-8,0,8),Vector3.new(12,0,-8),Vector3.new(-12,0,-8),Vector3.new(16,0,12)}) do
+		for _,shift in ipairs({Vector3.new(8,0,8),Vector3.new(-8,0,8),Vector3.new(12,0,-8),Vector3.new(-12,0,-8),Vector3.new(16,0,12),Vector3.new(32,0,0),Vector3.new(-32,0,0),Vector3.new(0,0,32),Vector3.new(0,0,-32)}) do
 			local center=Vector3.new(math.floor(origin.X)+shift.X,math.floor(origin.Y+.5)+3*(profile.scale-1),math.floor(origin.Z)+.5+shift.Z)
 			local candidate={} local clear=true
 			for i,spec in ipairs(specs) do
@@ -4967,7 +5077,12 @@ StudioHooks.extras=(function()
 		for i,spec in ipairs(specs) do data.records[i]={name=spec.name,pending={}} end
 		return data
 	end
-	function E.create()
+	function E.create(forceFresh)
+		if StudioHooks.stairwell and StudioHooks.stairwell.busy then say("Дождись расчёта Stairwell",true) return false end
+		if forceFresh and not unloaded then
+			E.restore()
+			if E.busy then E.nextCreate=true say("Новая форма в приоритете · отменяю прежнюю операцию") return true end
+		end
 		if E.running then say("Двойник уже запущен") return false end
 		if E.busy or _G.autobuildRunning or busySaving or unloaded then say("Сначала останови текущую работу",true) return false end
 		local body,err=avatar() if not body then say(err,true) return false end
@@ -4978,41 +5093,56 @@ StudioHooks.extras=(function()
 		if not StudioHooks.stageCompanion then say("Каталог ещё не готов",true) return false end
 		StudioHooks.stageCompanion(E.data.code,E.data.stageId,E.presets[E.preset].name)
 		E.save()
+		local data=E.data
 		return runAction(function()
-			say("Строю форму · "..#E.data.rows.." деталей")
-			local complete,message=runBuilderEngine(E.data.code,Vector3.zero,false)
-			checked(not unloaded,"ORBIT выгружен")
-			if resumeSession and resumeSession.buildId==E.data.stageId then
+			say("Строю форму · "..#data.rows.." деталей")
+			local complete,message=runBuilderEngine(data.code,Vector3.zero,false)
+			checked(not unloaded and not interrupted() and E.data==data,"Прежняя модель отменена")
+			if resumeSession and resumeSession.buildId==data.stageId then
 				for i,b in ipairs(resumeSession.blocks) do if own(b.placedBrick) and geometryMatches(b.placedBrick,b) then
-					local r=E.data.records[i] r.part=b.placedBrick
-					r.part:SetAttribute("OrbitCompanionId",E.data.token) r.part:SetAttribute("OrbitCompanionBody",r.name)
-					E.byPart[r.part]={record=r,data=E.data}
+					local r=data.records[i] r.part=b.placedBrick
+					r.part:SetAttribute("OrbitCompanionId",data.token) r.part:SetAttribute("OrbitCompanionBody",r.name)
+					E.byPart[r.part]={record=r,data=data}
 				end end
 			end
 			E.save() checked(complete,message)
 			cleanupVisuals(true) activate(body)
 		end)
 	end
-	function E.restore()
+	function E.pause()
 		E.cancel=true E.stopRequested=true E.activeCount=0 release()
 		if E.busy then _G.stopautobuild=true end
 		if E.data then for _,record in ipairs(E.data.records) do if not validRecord(record) then forgetMissing(record) end end end
 		E.save() say(E.busy and "Управление снято · останавливаю текущую команду" or "Остановлен · управление и старый пул отвязаны")
 		return true
 	end
+	local function clearLocalLook()
+		for part,look in pairs(E.localLook) do if part.Parent then pcall(function() part.LocalTransparencyModifier=look.transparency part.CanTouch=look.touch part.CanQuery=look.query end) end end
+		E.localLook={}
+	end
+	function E.restore()
+		E.nextCreate=nil E.pause() clearLocalLook()
+		local abandoned=E.models
+		E.models={} E.byPart={} E.data=nil E.network.begin()
+		_G.ORBIT_COMPANION_STATE=nil _G.ORBIT_COMPANION_MODELS={job=game.JobId,preset=E.preset,models=E.models}
+		for _,data in pairs(abandoned) do if StudioHooks.forgetCompanion then pcall(StudioHooks.forgetCompanion,data.stageId) end end
+		E.save() say(E.busy and "Старая модель забыта · отменяю последнюю операцию" or "Старая модель и запросы забыты · можно создать новую")
+		return true
+	end
 	function E.park()
 		if E.busy then say("Сначала останови текущую операцию",true) return false end
 		if not E.data then say("Модель ещё не создана") return false end
+		local data=E.data
 		release()
 		return runAction(function()
 			say("Возвращаю блоки на место")
 			local available,failed,missing=0,0,0
-			for i,r in ipairs(E.data.records) do
+			for i,r in ipairs(data.records) do
 				if interrupted() then break end
 				if not validRecord(r) then forgetMissing(r) missing+=1 else
 				local ok=pcall(function()
-				pose(r,CFrame.new(E.data.rows[i].pos))
-				if not r.part.Anchored then checked(waitFor(function() return (r.part.Position-E.data.rows[i].pos).Magnitude<.2 and (r.part.CFrame.RightVector-Vector3.new(1,0,0)).Magnitude<.05 and (r.part.CFrame.UpVector-Vector3.new(0,1,0)).Magnitude<.05 end,6),"Не удалось вернуть блок: нет физического контроля") end
+				pose(r,CFrame.new(data.rows[i].pos))
+				if not r.part.Anchored then checked(waitFor(function() return (r.part.Position-data.rows[i].pos).Magnitude<.2 and (r.part.CFrame.RightVector-Vector3.new(1,0,0)).Magnitude<.05 and (r.part.CFrame.UpVector-Vector3.new(0,1,0)).Magnitude<.05 end,6),"Не удалось вернуть блок: нет физического контроля") end
 				checked(toggle(r,"Anchored",true))
 				checked(toggle(r,"CanCollide",false))
 				end)
@@ -5022,9 +5152,8 @@ StudioHooks.extras=(function()
 		end)
 	end
 	function E.close()
-		E.cancel=true E.afterStop=nil release()
-		for part,look in pairs(E.localLook) do if part.Parent then pcall(function() part.LocalTransparencyModifier=look.transparency part.CanTouch=look.touch part.CanQuery=look.query end) end end
-		E.localLook={}
+		E.cancel=true E.afterStop=nil E.nextCreate=nil release()
+		clearLocalLook()
 		if E.returnRoot and E.returnRoot.Parent then pcall(function() E.returnRoot.CFrame=E.returnPose end) end
 		E.returnRoot=nil E.returnPose=nil
 		local ok,err=E.save()
@@ -5032,7 +5161,7 @@ StudioHooks.extras=(function()
 		if not ok and writefile then error(err,0) end
 	end
 	function E.snapshot()
-		local body,err=avatar() local result={version=2,preset=E.preset,activeCount=E.activeCount or 0,expectedCount=E.presets[E.preset].count,running=E.running,busy=E.busy,message=E.message,distance=E.distance,side=E.side,rig=body and "R6" or err,parts={},error=E.maxError}
+		local body,err=avatar() local result={version=3,preset=E.preset,activeCount=E.activeCount or 0,expectedCount=E.presets[E.preset].count,running=E.running,busy=E.busy,message=E.message,distance=E.distance,effectiveDistance=E.effectiveDistance,networkGuard=E.network.guard,lostControl=E.network.lost,knownControl=E.network.known,ownershipLosses=E.network.lossEvents,recoveredControl=E.network.recovered,nearestPlayer=E.network.nearest,reclaiming=E.reclaiming,side=E.side,rig=body and "R6" or err,parts={},error=E.maxError}
 		if E.data then for i,r in ipairs(E.data.records) do
 			local part=r.part result.parts[i]={name=r.name,own=validRecord(r)==true,present=part and part.Parent~=nil or false,anchored=part and part.Anchored,collide=part and part.CanCollide,pos=part and part.Position,size=part and part.Size,color=part and colorHex(part.Color),pending=r.pending,goal=E.movers[part] and E.movers[part].position.Position}
 			local item=result.parts[i] local mover=E.movers[part]
@@ -5047,6 +5176,196 @@ StudioHooks.extras=(function()
 	end
 	_G.ORBIT_COMPANION_API=E
 	return E
+end)()
+
+-- Bounded layout search, once before building. Never picks up or removes world parts.
+StudioHooks.stairwell=(function()
+	local S={busy=false,job=0,message="Этажи → preview → строительство",options={floors=3,rise=16}}
+	if readfile and isfile then pcall(function() if isfile("OrbitStairwell.json") then local saved=HttpService:JSONDecode(readfile("OrbitStairwell.json")) if type(saved)=="table" then S.options=saved end end end) end
+	local function status(message,failure)
+		S.message=message if StudioHooks.stairStatus then StudioHooks.stairStatus(message) end setStatus(message,failure)
+	end
+	function S.configure(options)
+		local floors,rise=tonumber(options.floors),tonumber(options.rise)
+		if not floors or floors~=floors or not rise or rise~=rise then return nil,"Введи числа" end
+		local result={floors=math.clamp(math.round(floors),1,64),rise=math.clamp(math.round(rise/4)*4,12,24)}
+		S.options=result if writefile then pcall(function() writefile("OrbitStairwell.json",HttpService:JSONEncode(result)) end) end
+		return result
+	end
+	if not S.configure(S.options) then S.configure({floors=3,rise=16}) end
+	local function box(lo,hi) return {pos=(lo+hi)/2,size=hi-lo} end
+	local function bounds(rows)
+		local lo,hi
+		for _,r in ipairs(rows) do local a,b=r.pos-r.size/2,r.pos+r.size/2
+			lo=lo and Vector3.new(math.min(lo.X,a.X),math.min(lo.Y,a.Y),math.min(lo.Z,a.Z)) or a
+			hi=hi and Vector3.new(math.max(hi.X,b.X),math.max(hi.Y,b.Y),math.max(hi.Z,b.Z)) or b
+		end
+		return box(lo,hi)
+	end
+	function S.module(origin,direction,rise,level,turn)
+		local rows,routes={},{} local right=Vector3.new(direction.Z,0,-direction.X)
+		local shade=math.clamp(math.round(255*(25-level)/24),0,255)
+		local function transform(lo,hi)
+			local r=box(lo,hi) local p=r.pos
+			r.pos=origin+right*p.X+Vector3.new(0,p.Y,0)+direction*p.Z
+			if direction.X~=0 then r.size=Vector3.new(r.size.Z,r.size.Y,r.size.X) end
+			return r
+		end
+		local function part(lo,hi,neon)
+			local r=transform(lo,hi) local n=shade
+			r.color=Color3.new(n/255,n/255,n/255) r.material=neon and Enum.Material.Neon or Enum.Material.Brick r.level=level
+			rows[#rows+1]=r
+		end
+		local function cubes(lo,hi)
+			for x=lo.X,hi.X-4,4 do for y=lo.Y,hi.Y-4,4 do for z=lo.Z,hi.Z-4,4 do part(Vector3.new(x,y,z),Vector3.new(x+4,y+4,z+4)) end end end
+		end
+		local function passage(lo,hi) routes[#routes+1]=transform(lo,hi) end
+		-- Four rises share a base; repeated 4-wide strips are cheap to clone.
+		for z=0,rise-1 do
+			local base=math.floor(z/4)*4 local height=z%4+1
+			for x=-4,0,4 do part(Vector3.new(x,base,z),Vector3.new(x+4,base+height,z+1)) end
+			passage(Vector3.new(-4,z+1,z),Vector3.new(4,z+9,z+1))
+		end
+		for z=0,rise-4,4 do
+			cubes(Vector3.new(-8,z,z),Vector3.new(-4,z+16,z+4))
+			cubes(Vector3.new(4,z,z),Vector3.new(8,z+16,z+4))
+			cubes(Vector3.new(-4,z+16,z),Vector3.new(4,z+20,z+4))
+			if z%8==0 then part(Vector3.new(-1,z+14,z+1),Vector3.new(1,z+15,z+3),true) end
+		end
+		-- Landing: 32×16 outside; 24×8 usable. Entry and exit are real openings.
+		cubes(Vector3.new(-8,rise-4,rise),Vector3.new(24,rise,rise+16))
+		cubes(Vector3.new(-8,rise+12,rise),Vector3.new(24,rise+16,rise+16))
+		cubes(Vector3.new(-8,rise,rise),Vector3.new(-4,rise+12,rise+4))
+		cubes(Vector3.new(4,rise,rise),Vector3.new(24,rise+12,rise+4))
+		if turn~="straight" then cubes(Vector3.new(-8,rise,rise+12),Vector3.new(24,rise+12,rise+16))
+		else
+			cubes(Vector3.new(-8,rise,rise+12),Vector3.new(-4,rise+12,rise+16))
+			cubes(Vector3.new(4,rise,rise+12),Vector3.new(24,rise+12,rise+16))
+		end
+		if turn~="left" then cubes(Vector3.new(-8,rise,rise+4),Vector3.new(-4,rise+12,rise+12)) end
+		if turn~="right" then cubes(Vector3.new(20,rise,rise+4),Vector3.new(24,rise+12,rise+12)) end
+		for x=0,16,8 do part(Vector3.new(x-1,rise+10,rise+7),Vector3.new(x+1,rise+11,rise+9),true) end
+		passage(Vector3.new(-4,rise,rise),Vector3.new(4,rise+8,rise+4))
+		passage(Vector3.new(-4,rise,rise+4),Vector3.new(20,rise+8,rise+12))
+		local nextOrigin,nextDirection
+		if turn=="end" then
+			nextOrigin=origin+Vector3.new(0,rise,0) nextDirection=direction
+		elseif turn=="right" then
+			passage(Vector3.new(20,rise,rise+4),Vector3.new(24,rise+8,rise+12))
+			nextOrigin=origin+right*24+Vector3.new(0,rise,0)+direction*(rise+8) nextDirection=right
+		elseif turn=="left" then
+			passage(Vector3.new(-8,rise,rise+4),Vector3.new(-4,rise+8,rise+12))
+			nextOrigin=origin-right*8+Vector3.new(0,rise,0)+direction*(rise+8) nextDirection=right*-1
+		else
+			passage(Vector3.new(-4,rise,rise+12),Vector3.new(4,rise+8,rise+16))
+			nextOrigin=origin+Vector3.new(0,rise,0)+direction*(rise+16) nextDirection=direction
+		end
+		-- Space to approach the first tread. The previous landing normally covers it.
+		passage(Vector3.new(-4,0,-4),Vector3.new(4,8,0))
+		local solidBounds=bounds(rows)
+		return {rows=rows,routes=routes,origin=origin,nextOrigin=nextOrigin,nextDirection=nextDirection,turn=turn,level=level,bounds=solidBounds,clearBounds=StudioHooks.liveWorld.focus(solidBounds,bounds(routes))}
+	end
+	local function clear(candidate,previous,obstacles)
+		local solids,passages,world={},{},{}
+		for _,old in ipairs(previous) do if Planner.intersects(candidate.clearBounds,old.clearBounds) then
+			for _,r in ipairs(old.rows) do solids[#solids+1]=r end for _,r in ipairs(old.routes) do passages[#passages+1]=r end
+		end end
+		for _,part in ipairs(obstacles) do if part.Parent then local r=StudioHooks.guard.worldBox(part) r.instance=part world[#world+1]=r end end
+		local solidIndex,routeIndex,worldIndex=Planner.spatial(solids),Planner.spatial(passages),Planner.spatial(world)
+		for _,r in ipairs(candidate.rows) do
+			for _,v in ipairs(worldIndex:query(r)) do if v.instance.Parent and StudioHooks.guard.intersects(v.instance,r) then return false end end
+			for _,v in ipairs(solidIndex:query(r)) do if Planner.intersects(r,v) then return false end end
+			for _,v in ipairs(routeIndex:query(r)) do if Planner.intersects(r,v) then return false end end
+		end
+		for _,r in ipairs(candidate.routes) do
+			for _,v in ipairs(worldIndex:query(r)) do if v.instance.Parent and StudioHooks.guard.intersects(v.instance,r) then return false end end
+			for _,v in ipairs(solidIndex:query(r)) do if Planner.intersects(r,v) then return false end end
+		end
+		return true
+	end
+	function S.layout(origin,direction,options,query,cooperate)
+		local path={} local attempts=0 local exhausted=false
+		local function search(start,heading,level)
+			if level>options.floors then return true end
+			for _,turn in ipairs(level==options.floors and {"end"} or {"right","left","straight"}) do
+				attempts+=1 if attempts>256 then exhausted=true return false end
+				if cooperate and cooperate(level,attempts)==false then return false end
+				local rise=level==1 and 12 or options.rise
+				local candidate=S.module(start,heading,rise,level,turn)
+				local focus=StudioHooks.liveWorld.focus(candidate.bounds,bounds(candidate.routes))
+				if clear(candidate,path,query(focus)) then
+					path[#path+1]=candidate
+					if search(candidate.nextOrigin,candidate.nextDirection,level+1) then return true end
+					path[#path]=nil
+				end
+			end
+			return false
+		end
+		if not search(origin,direction,1) then return nil,exhausted and "Лимит поиска: свободный маршрут не найден" or "Нет свободного маршрута: измени место или число этажей" end
+		return path,attempts
+	end
+	function S.cancel() S.job+=1 S.busy=false status("Расчёт отменён") end
+	function S.generate(options)
+		if unloaded or _G.autobuildRunning or busySaving or StudioHooks.extras and (StudioHooks.extras.busy or StudioHooks.extras.running) then status("Сначала останови текущую работу",true) return false end
+		local config,err=S.configure(options or S.options) if not config then status(err,true) return false end
+		local hrp=getValidHRP() if not hrp then status("Нужен персонаж",true) return false end
+		S.job+=1 local job=S.job S.busy=true
+		local pos=hrp.Position local look=hrp.CFrame.LookVector
+		local heading=math.abs(look.X)>math.abs(look.Z) and Vector3.new(look.X>0 and 1 or -1,0,0) or Vector3.new(0,0,look.Z>0 and 1 or -1)
+		local ground=pos.Y-3
+		pcall(function()
+			local params=RaycastParams.new() params.FilterType=Enum.RaycastFilterType.Exclude
+			local ignore={LocalPlayer.Character} if visualFolder then ignore[#ignore+1]=visualFolder end
+			local imaginary=workspace:FindFirstChild("Autobuild_Imaginary_"..LocalPlayer.UserId) if imaginary then ignore[#ignore+1]=imaginary end
+			params.FilterDescendantsInstances=ignore
+			local hit=workspace:Raycast(pos+Vector3.new(0,2,0),Vector3.new(0,-80,0),params) if hit then ground=hit.Position.Y end
+		end)
+		local origin=Vector3.new(math.round(pos.X/4)*4,math.ceil(ground/4)*4,math.round(pos.Z/4)*4)+heading*12
+		task.spawn(function()
+			local ok,result=pcall(function()
+				local root=workspace:FindFirstChild("Bricks")
+				local function cooperate(level,attempt)
+					if unloaded or job~=S.job then return false end
+					status(string.format("Расчёт · этаж %d/%d · вариант %d",level,config.floors,attempt)) task.wait()
+					return not unloaded and job==S.job
+				end
+				if root then StudioHooks.liveWorld.parts(root,function() task.wait() return not unloaded and job==S.job end) end
+				local query=function(focus) return root and StudioHooks.liveWorld.query(root,focus) or {} end
+				local path,message
+				local right=Vector3.new(heading.Z,0,-heading.X)
+				for _,shift in ipairs({Vector3.zero,right*32,right*-32,heading*32,right*64,right*-64,heading*64}) do
+					if unloaded or job~=S.job then return end
+					path,message=S.layout(origin+shift,heading,config,query,cooperate) if path then break end
+				end
+				if not path then error(message,0) end
+				-- Final live check covers edits/moving obstacles during calculation.
+				local previous={}
+				for _,floor in ipairs(path) do
+					if unloaded or job~=S.job then return end
+					local focus=StudioHooks.liveWorld.focus(floor.bounds,bounds(floor.routes))
+					if not clear(floor,previous,query(focus)) then error("Мир изменился во время расчёта · создай preview заново",0) end
+					previous[#previous+1]=floor
+				end
+				local encoded={} local count=0
+				for _,floor in ipairs(path) do for _,r in ipairs(floor.rows) do count+=1 encoded[#encoded+1]=serializeBlock({centerPos=r.pos,size=r.size,color=r.color,material=r.material,canCollide=true,sprays={}}) end end
+				local guidOk,guid=pcall(function() return HttpService:GenerateGUID(false) end)
+				local id="stairwell_"..(guidOk and guid or tostring(os.time()).."_"..tostring(math.random(1,100000000)))
+				S.last={id=id,code=table.concat(encoded),path=path,count=count}
+				StudioHooks.stageStairwell(S.last.code,id,"Stairwell · "..config.floors)
+				status(string.format("Готово · %d этажей · %d блоков. Проверь preview, затем строй.",config.floors,count))
+			end)
+			if job==S.job then S.busy=false if not ok and not unloaded then status(tostring(result),true) end end
+		end)
+		return true
+	end
+	function S.build()
+		if S.busy then status("Дождись расчёта",true) return false end
+		local tab=tabsData[activeTabIndex]
+		if not tab or type(tab.id)~="string" or tab.id:sub(1,10)~="stairwell_" then status("Открой созданную вкладку Stairwell",true) return false end
+		StudioHooks.resumeRecovery() return true
+	end
+	function S.close() S.job+=1 S.busy=false end
+	return S
 end)()
 
 StudioHooks.resumeRecovery=function() launchAction(false) end
@@ -5591,7 +5910,9 @@ for i,pair in ipairs({{"r6","R6 · 6"},{"voxels","Кубики · 13"},{"voxels2
 	local b=button(companionWindow,pair[2],UDim2.fromOffset(16+((i-1)%2)*160,136+math.floor((i-1)/2)*34),UDim2.fromOffset(152,28),"deep") forms[pair[1]]=b b.Name="CompanionForm_"..pair[1]
 	trackConn(b.MouseButton1Click:Connect(function() local E=StudioHooks.extras if E and E.setPreset(pair[1]) then for key,item in pairs(forms) do skin(item,key==E.preset and "soft" or "deep") end end end))
 end
-label(companionWindow,"Отступ · стады (14 = 3,5 куба по 4)",UDim2.fromOffset(16,206),UDim2.new(1,-32,0,22),11,"muted")
+label(companionWindow,"Отступ · стады",UDim2.fromOffset(16,206),UDim2.fromOffset(152,22),11,"muted")
+local networkGuard=button(companionWindow,"Защита: ВКЛ",UDim2.fromOffset(184,206),UDim2.fromOffset(144,22),"soft") networkGuard.Name="CompanionNetworkGuard"
+trackConn(networkGuard.MouseButton1Click:Connect(function() local E=StudioHooks.extras if E and E.network then E.setNetworkGuard(not E.network.guard) networkGuard.Text=E.network.guard and "Защита: ВКЛ" or "Защита: ВЫКЛ" end end))
 local distance=field(companionWindow,"14",UDim2.fromOffset(16,234),UDim2.fromOffset(74,32)) distance.Name="R6CompanionDistance"
 local together=button(companionWindow,"Во мне",UDim2.fromOffset(100,234),UDim2.fromOffset(100,32),"deep")
 local near=button(companionWindow,"Рядом · 14",UDim2.fromOffset(210,234),UDim2.fromOffset(118,32),"deep")
@@ -5601,8 +5922,9 @@ for i,pair in ipairs({{"back","Сзади"},{"right","Справа"},{"left","С
 	local b=button(companionWindow,pair[2],UDim2.fromOffset(16+(i-1)*80,304),UDim2.fromOffset(72,32),"deep") directions[pair[1]]=b
 	trackConn(b.MouseButton1Click:Connect(function() if StudioHooks.extras then StudioHooks.extras.setSide(pair[1]) for key,button in pairs(directions) do skin(button,key==pair[1] and "soft" or "deep") end end end))
 end
-local start=button(companionWindow,"Создать / запустить",UDim2.fromOffset(16,348),UDim2.new(1,-32,0,38),"primary") start.Name="StartR6Companion"
-local restore=button(companionWindow,"Остановить / отвязать",UDim2.fromOffset(16,396),UDim2.new(1,-32,0,32),"deep") restore.Name="RestoreR6Companion"
+local start=button(companionWindow,"Создать новую форму",UDim2.fromOffset(16,348),UDim2.new(1,-32,0,38),"primary") start.Name="StartR6Companion"
+local restore=button(companionWindow,"Остановить",UDim2.fromOffset(16,396),UDim2.fromOffset(152,32),"deep") restore.Name="RestoreR6Companion"
+local reclaim=button(companionWindow,"Вернуть контроль",UDim2.fromOffset(176,396),UDim2.fromOffset(152,32),"deep") reclaim.Name="ReclaimR6Companion"
 local park=button(companionWindow,"Припарковать оставшиеся",UDim2.fromOffset(16,438),UDim2.new(1,-32,0,32),"deep") park.Name="ParkR6Companion"
 label(companionWindow,"Build / Paint / Shape · прозрачность для тебя 20%\nОстановка мгновенная. Для закрепления — парковка.",UDim2.fromOffset(16,484),UDim2.new(1,-32,0,36),10,"muted")
 for _,o in ipairs(companionWindow:GetDescendants()) do if o:IsA("GuiObject") then o.ZIndex=82 end end
@@ -5614,12 +5936,14 @@ trackConn(companionOpen.MouseButton1Click:Connect(function()
 	local E=StudioHooks.extras
 	if E then distance.Text=tostring(E.distance) miniStatus.Text=E.message for key,b in pairs(directions) do skin(b,key==E.side and "soft" or "deep") end end
 	if E then for key,b in pairs(forms) do skin(b,key==E.preset and "soft" or "deep") end end
+	if E and E.network then networkGuard.Text=E.network.guard and "Защита: ВКЛ" or "Защита: ВЫКЛ" end
 	local camera=workspace.CurrentCamera local viewport=camera and camera.ViewportSize or Vector2.new(1920,1080) local p=companionWindow.AbsolutePosition
 	companionWindow.Position=UDim2.fromOffset(math.clamp(p.X,0,math.max(0,viewport.X-344)),math.clamp(p.Y,0,math.max(0,viewport.Y-530)))
 end))
 trackConn(miniClose.MouseButton1Click:Connect(function() miniOpened=false miniVisible() end))
-trackConn(start.MouseButton1Click:Connect(function() if StudioHooks.extras then StudioHooks.extras.create() end end))
+trackConn(start.MouseButton1Click:Connect(function() if StudioHooks.extras then StudioHooks.extras.create(true) end end))
 trackConn(restore.MouseButton1Click:Connect(function() if StudioHooks.extras then StudioHooks.extras.restore() end end))
+trackConn(reclaim.MouseButton1Click:Connect(function() if StudioHooks.extras then StudioHooks.extras.reclaim() end end))
 trackConn(park.MouseButton1Click:Connect(function() if StudioHooks.extras then StudioHooks.extras.park() end end))
 local function applyDistance(value)
 	if StudioHooks.extras then StudioHooks.extras.setDistance(value) distance.Text=tostring(StudioHooks.extras.distance) end
@@ -5645,6 +5969,62 @@ trackConn(UserInputService.InputChanged:Connect(function(input)
 end))
 trackConn(UserInputService.InputEnded:Connect(function(input) if miniDragging and input==miniDragging.input then miniDragging=nil end end))
 trackConn(UserInputService.WindowFocusReleased:Connect(function() miniDragging=nil end))
+
+UI.extrasPage.CanvasSize=UDim2.fromOffset(0,438)
+local stairGroup=create("Frame",{Name="GeneratorGroup",Parent=UI.extrasPage,Position=UDim2.fromOffset(0,256),Size=UDim2.new(1,0,0,154),BackgroundColor3=palette.panel}) skin(stairGroup,"panel") corners(stairGroup,9) stroke(stairGroup)
+label(stairGroup,"Генераторы",UDim2.fromOffset(18,12),UDim2.new(1,-36,0,26),17,"accent","strong")
+label(stairGroup,"ПЛОЩАДКИ И ЛЕСТНИЦЫ",UDim2.fromOffset(18,46),UDim2.new(1,-36,0,20),10,"muted","medium")
+local stairOpen=button(stairGroup,"Stairwell   ↗",UDim2.fromOffset(18,78),UDim2.new(1,-36,0,38),"deep") stairOpen.Name="OpenStairwell"
+label(stairGroup,"По образцу 9mzee · свободный маршрут между этажами",UDim2.fromOffset(18,120),UDim2.new(1,-36,0,24),11,"muted")
+local stairWindow=create("Frame",{Name="StairwellWindow",Parent=gui,Position=UDim2.new(.5,-180,.5,-205),Size=UDim2.fromOffset(360,410),BackgroundColor3=palette.base,Visible=false,Active=true,ZIndex=84}) skin(stairWindow,"base") corners(stairWindow,11) stroke(stairWindow)
+local stairHeader=create("Frame",{Parent=stairWindow,Size=UDim2.new(1,0,0,44),BackgroundTransparency=1,Active=true})
+label(stairHeader,"Stairwell / Генератор",UDim2.fromOffset(16,10),UDim2.new(1,-60,0,26),13,"text","strong")
+local stairClose=button(stairHeader,"×",UDim2.new(1,-38,0,8),UDim2.fromOffset(28,28),"deep") stairClose.Name="CloseStairwell"
+local stairStatus=label(stairWindow,"Лестница 8 стад шириной → площадка → следующий этаж.",UDim2.fromOffset(16,54),UDim2.new(1,-32,0,50),12,"accent") stairStatus.Name="StairwellStatus"
+local stairFields={}
+for i,item in ipairs({{"floors","Этажей · 1–64","3"},{"rise","Подъём · стады","16"}}) do
+	label(stairWindow,item[2],UDim2.fromOffset(16+(i-1)*168,112),UDim2.fromOffset(160,22),10,"muted")
+	local f=field(stairWindow,item[3],UDim2.fromOffset(16+(i-1)*168,140),UDim2.fromOffset(160,32)) f.Name="Stairwell_"..item[1] stairFields[item[1]]=f
+end
+label(stairWindow,"1-й этаж белый → 25-й чёрный → дальше чёрные.\nПервый подъём: 12. Далее: 12–24, кратно 4.\nПроход высотой 8. Постройки обходятся без расчистки.\nЗатемнение меняет HEX стен и Neon, не яркость лампы.",UDim2.fromOffset(16,184),UDim2.new(1,-32,0,74),10,"muted")
+local stairPreview=button(stairWindow,"Создать preview",UDim2.fromOffset(16,270),UDim2.new(1,-32,0,36),"primary") stairPreview.Name="GenerateStairwell"
+local stairBuild=button(stairWindow,"Построить",UDim2.fromOffset(16,316),UDim2.fromOffset(160,32),"soft") stairBuild.Name="BuildStairwell"
+local stairCancel=button(stairWindow,"Отменить расчёт",UDim2.fromOffset(184,316),UDim2.fromOffset(160,32),"deep") stairCancel.Name="CancelStairwell"
+label(stairWindow,"План считается перед строительством. Этажи идут снизу вверх.",UDim2.fromOffset(16,366),UDim2.new(1,-32,0,30),10,"muted")
+for _,o in ipairs(stairWindow:GetDescendants()) do if o:IsA("GuiObject") then o.ZIndex=86 end end
+local stairOpened=false
+local function stairVisible() stairWindow.Visible=stairOpened and mainFrame.Visible end
+trackConn(mainFrame:GetPropertyChangedSignal("Visible"):Connect(stairVisible))
+trackConn(stairOpen.MouseButton1Click:Connect(function()
+	stairOpened=true stairVisible()
+	local S=StudioHooks.stairwell if S then stairStatus.Text=S.message for key,f in pairs(stairFields) do f.Text=tostring(S.options[key]) end end
+	local camera=workspace.CurrentCamera local viewport=camera and camera.ViewportSize or Vector2.new(1920,1080) local p=stairWindow.AbsolutePosition
+	stairWindow.Position=UDim2.fromOffset(math.clamp(p.X,0,math.max(0,viewport.X-360)),math.clamp(p.Y,0,math.max(0,viewport.Y-410)))
+end))
+trackConn(stairClose.MouseButton1Click:Connect(function() stairOpened=false stairVisible() end))
+trackConn(stairPreview.MouseButton1Click:Connect(function()
+	local S=StudioHooks.stairwell if not S then return end
+	local options={} for key,f in pairs(stairFields) do options[key]=f.Text:gsub(",",".") end
+	S.generate(options) for key,f in pairs(stairFields) do f.Text=tostring(S.options[key]) end
+end))
+trackConn(stairBuild.MouseButton1Click:Connect(function() if StudioHooks.stairwell then StudioHooks.stairwell.build() end end))
+trackConn(stairCancel.MouseButton1Click:Connect(function() if StudioHooks.stairwell then StudioHooks.stairwell.cancel() end end))
+StudioHooks.stairStatus=function(message) stairStatus.Text=message end
+local otherExtraHit=UI.extraHit
+function UI.extraHit(point)
+	local p,s=stairWindow.AbsolutePosition,stairWindow.AbsoluteSize
+	return otherExtraHit(point) or stairWindow.Visible and point.X>=p.X and point.X<=p.X+s.X and point.Y>=p.Y and point.Y<=p.Y+s.Y
+end
+local stairDrag
+trackConn(stairHeader.InputBegan:Connect(function(input) if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then stairDrag={input=input,start=input.Position,position=stairWindow.AbsolutePosition} end end))
+trackConn(UserInputService.InputChanged:Connect(function(input)
+	if not stairDrag or not stairWindow.Visible or input.UserInputType~=Enum.UserInputType.MouseMovement and input~=stairDrag.input then return end
+	local camera=workspace.CurrentCamera local viewport=camera and camera.ViewportSize or Vector2.new(1920,1080)
+	local delta=input.Position-stairDrag.start local point=stairDrag.position+Vector2.new(delta.X,delta.Y)
+	stairWindow.Position=UDim2.fromOffset(math.clamp(point.X,0,math.max(0,viewport.X-360)),math.clamp(point.Y,0,math.max(0,viewport.Y-410)))
+end))
+trackConn(UserInputService.InputEnded:Connect(function(input) if stairDrag and input==stairDrag.input then stairDrag=nil end end))
+trackConn(UserInputService.WindowFocusReleased:Connect(function() stairDrag=nil end))
 
 local state={mode="welcome",code=false,more=false,tool=nil,paint="both"}
 local function refreshVisibility()
@@ -6098,6 +6478,13 @@ return UI
 		syncVisibility() renderTabs()
 		setStatus(nextMode=="create" and "Мастерская · R меняет режим инструмента · Ctrl+Z отменяет действие" or nextMode=="extras" and "Приколы · выбери группу и открой мини-окно" or "Загрузи код → рассчитай план → проверь → строй")
 	end
+	StudioHooks.stageStairwell=function(code,id,name)
+		if _G.autobuildRunning or busySaving then error("Текущая работа ещё не завершена",0) end
+		local previous=tabsData[activeTabIndex] local p=_G.buildOffset or Vector3.zero previous.placement={p.X,p.Y,p.Z}
+		tabsData[#tabsData+1]={id=id,name=name,content=code,placement={0,0,0}}
+		activeTabIndex=#tabsData cleanupVisuals(true) _G.buildOffset=Vector3.zero
+		setBuildContent(code) renderTabs() updateDefaultStats() setMode("load") showVisuals()
+	end
 	StudioHooks.stageCompanion=function(code,id,name)
 		setMode("extras")
 		local previous=tabsData[activeTabIndex] local p=_G.buildOffset or Vector3.zero previous.placement={p.X,p.Y,p.Z}
@@ -6106,6 +6493,21 @@ return UI
 		if not index then tabsData[#tabsData+1]={id=id,name=name or "Двойник R6",content=code,placement={0,0,0}} index=#tabsData end
 		activeTabIndex=index cleanupVisuals(true) _G.buildOffset=Vector3.zero
 		setBuildContent(code) renderTabs() updateDefaultStats()
+	end
+	StudioHooks.forgetCompanion=function(id)
+		local index
+		for i,tab in ipairs(tabsData) do if tab.id==id then index=i break end end
+		if not index then return end
+		local tab=tabsData[index]
+		if StudioHooks.documents then StudioHooks.documents.discard(tab) end
+		if StudioHooks.guard and StudioHooks.guard.session and StudioHooks.guard.session.buildId==id then StudioHooks.guard.close() end
+		if resumeSession and resumeSession.buildId==id then resumeSession=nil end
+		table.remove(tabsData,index)
+		if #tabsData==0 then tabsData[1]={name="Build 1",content="",placement={0,0,0}} end
+		if activeTabIndex>index then activeTabIndex-=1 elseif activeTabIndex==index then activeTabIndex=math.min(index,#tabsData) end
+		cleanupVisuals(true)
+		local current=tabsData[activeTabIndex] local p=current.placement or {0,0,0} _G.buildOffset=Vector3.new(p[1],p[2],p[3])
+		setBuildContent(current.content or "") renderTabs() updateDefaultStats()
 	end
 	local function restore(direction)
 		if blocked() then return end
@@ -6651,6 +7053,7 @@ unloadScript = function()
 		local ok,err=pcall(fn)
 		if not ok then errors[#errors+1]=name..": "..tostring(err) end
 	end
+	step("Stairwell",function() if StudioHooks.stairwell then StudioHooks.stairwell.close() end end)
 	step("Двойник",function() if StudioHooks.extras then StudioHooks.extras.close() end end)
 	step("Защита",function() if StudioHooks.guard then StudioHooks.guard.close() end end)
 	local sessions={} local seen={}
@@ -6697,4 +7100,4 @@ unloadScript = function()
 end
 
 _G.AUTOBUILD_UNLOAD = unloadScript
-setStatus("ORBIT forms-16: четыре формы / кубики / мгновенная остановка")
+setStatus("ORBIT stairwell-18: генератор площадок и новый пул форм")
