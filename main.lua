@@ -167,7 +167,7 @@ StudioHooks.documents=(function()
 	function D.pending(session)
 		if StudioHooks.runtimeState then return StudioHooks.runtimeState.pending(session) end
 		for _,b in ipairs(session.blocks or {}) do
-			if b.creation or b.pendingResize and b.pendingResize.brick and b.pendingResize.brick.Parent or (b.pendingCollision or b.repairDeleteRequested) and b.placedBrick and b.placedBrick.Parent then return true end
+			if sent(b.creation) or b.pendingResize and b.pendingResize.brick and b.pendingResize.brick.Parent or (b.pendingCollision or b.repairDeleteRequested) and b.placedBrick and b.placedBrick.Parent then return true end
 			for _,old in ipairs(b.retired or {}) do if (old.attempts or 1)>0 then return true end end
 			for _,h in ipairs(b.work and b.work.helpers or {}) do if h.creation or h.brick and h.brick.Parent then return true end end
 		end
@@ -203,12 +203,13 @@ StudioHooks.documents=(function()
 		return result
 	end
 	function D.reservations(session)
+		local function sentCreation(c) return c and (c.attempts~=0 or c.sentUnix~=nil) end
 		local result={}
 		for _,s in ipairs(D.otherJobs(session)) do
 			local function add(box) if box then result[#result+1]={id="inactive:"..s.buildId..":"..#result,reservedTarget="inactive:"..s.buildId,pos=box.pos,size=box.size,color=Color3.new(1,1,1),material=Enum.Material.Plastic,collide=true,sprays={},eligible=false} end end
 			local function holder(h)
-				if h.creation then add(h.creation.initial) end
-				for _,old in ipairs(h.retired or {}) do add(old.initial) end
+				if h.creation and sentCreation(h.creation) then add(h.creation.initial) end
+				for _,old in ipairs(h.retired or {}) do if sentCreation(old) then add(old.initial) end end
 				if h.brick and h.brick.Parent and (h.creation or h.temporary) then add({pos=h.brick.Position,size=h.brick.Size}) end
 			end
 			for i in pairs(StudioHooks.runtimeState.ensure(s).active) do
@@ -229,8 +230,8 @@ StudioHooks.documents=(function()
 					end
 					local function holder(h)
 						if type(h)~="table" then return end
-						if type(h.creation)=="table" then add(h.creation.initial) end
-						for _,old in ipairs(h.retired or {}) do add(old.initial) end
+						if type(h.creation)=="table" and sentCreation(h.creation) then add(h.creation.initial) end
+						for _,old in ipairs(h.retired or {}) do if sentCreation(old) then add(old.initial) end end
 						if h.temporary then add(h.brick) end
 					end
 					for _,record in ipairs(state.records or {}) do
@@ -802,7 +803,7 @@ local function updateDefaultStats()
 end
 
 btnLog.MouseButton1Click:Connect(function()
-	local text="Autobuild Studio v5 / ORBIT · stairwell-24\n"..table.concat(diagnosticLog,"\n")
+	local text="Autobuild Studio v5 / ORBIT · recovery-25\n"..table.concat(diagnosticLog,"\n")
 	if storageError then text=text.."\nStorage: "..storageError end
 	if copyText(text) then setStatus("Диагностика скопирована") else setStatus("Буфер обмена недоступен",true) end
 end)
@@ -2653,12 +2654,13 @@ StudioHooks.runtimeState=(function()
 		return result
 	end
 	function R.pending(session)
+		local function sent(c) return c and (c.attempts~=0 or c.sentUnix~=nil) end
 		local state=R.ensure(session)
 		for index in pairs(state.active) do
 			local b=session.blocks[index]
 			if b.creation or b.pendingResize and b.pendingResize.brick and b.pendingResize.brick.Parent or (b.pendingCollision or b.repairDeleteRequested) and b.placedBrick and b.placedBrick.Parent then return true end
 			for _,old in ipairs(b.retired or {}) do if (old.attempts or 1)>0 then return true end end
-			for _,h in ipairs(b.work and b.work.helpers or {}) do if h.creation or h.brick and h.brick.Parent then return true end end
+			for _,h in ipairs(b.work and b.work.helpers or {}) do if sent(h.creation) or h.brick and h.brick.Parent then return true end end
 		end
 		for part,value in pairs(session.obstacleDeletes or {}) do if value.requested and part.Parent then return true end end
 		return false
@@ -3378,6 +3380,7 @@ local function matchesAll(brick,data)
 	return true
 end
 local function reconcileBuild(session)
+	for _,data in ipairs(session.blocks) do StudioHooks.recovery.normalize(data,session) for _,h in ipairs(data.work and data.work.helpers or {}) do StudioHooks.recovery.normalize(h,session) end end
 	local own=getPlayerBricksFolder()
 	local world=own and own:GetDescendants() or {}
 	local function bucket(pos,size)
@@ -3457,24 +3460,25 @@ watchBuildCharacter(LocalPlayer.Character)
 
 local function ensureNear(position,sourcePosition,force)
 	local hrp=getValidHRP()
-	if not hrp or cancelled() then return false end
+	if not hrp or cancelled() then return false,"персонаж недоступен или строительство приостановлено" end
 	if not force and positionLock and (hrp.Position-position).Magnitude<=20 and (not sourcePosition or (hrp.Position-sourcePosition).Magnitude<=20) then return true end
 	local anchor=position
 	local height=CONFIG.BUILD_HEIGHT_OFFSET
 	if sourcePosition then
 		local gap=(position-sourcePosition).Magnitude
-		if gap>39.8 then return false end
+		if gap>39.8 then return false,"источник и точка клика слишком далеко друг от друга" end
 		anchor=(position+sourcePosition)/2
 		if math.abs(position.Y-sourcePosition.Y)>.01 then height=math.min(height,19.8-gap/2) else height=math.min(height,math.sqrt(math.max(0,19.8^2-(gap/2)^2))) end
 	end
 	local target=anchor+Vector3.new(0,height,0)
 	lockPosition(target)
 	local readyAt=os.clock()+StudioHooks.timing.settle(force)
-	return waitUntil(function()
+	local ready=waitUntil(function()
 		local c=LocalPlayer.Character
 		local r=c and c:FindFirstChild("HumanoidRootPart")
-		return os.clock()>=readyAt and r and (r.Position-target).Magnitude<.1
-	end,math.max(2,roundTripPing()*4+.5))
+		return os.clock()>=readyAt and r and (r.Position-target).Magnitude<.75 and (r.Position-position).Magnitude<=19.8 and (not sourcePosition or (r.Position-sourcePosition).Magnitude<=19.8)
+	end,responseTimeout(2))
+	return ready,not ready and "персонаж не закрепился в пределах дальности Build (пинг/FPS учтены)" or nil
 end
 local function facePoint(model,face)
 	for _,d in ipairs(Planner.directions) do
@@ -3486,6 +3490,46 @@ local createOnce=(function()
 	local C={}
 	local observerToken={}
 	local active={}
+	-- A failed preflight is not a request in flight. Legacy unknown requests stay pending.
+	function C.wasSent(c) return c and (c.attempts~=0 or c.sentUnix~=nil) end
+	function C.normalize(holder,session)
+		local changed=false local c=holder.creation
+		if c and not C.wasSent(c) then
+			if c.connection then c.connection:Disconnect() end active[c]=nil holder.creation=nil changed=true
+		end
+		for i=#(holder.retired or {}),1,-1 do
+			local old=holder.retired[i]
+			if not C.wasSent(old) then if old.connection then old.connection:Disconnect() end active[old]=nil table.remove(holder.retired,i) changed=true end
+		end
+		if changed then holder.createBlocked=nil end
+		return changed
+	end
+	function C.preflightFailure(holder,c,session,kind,message)
+		local previous=holder.preflight
+		local tries=previous and previous.action==session.actionRevision and previous.tries or 0
+		holder.preflight={kind=kind,message=message,tries=tries+1,action=session.actionRevision,nextAt=os.clock()+math.max(.3,roundTripPing()*2,StudioHooks.timing.frameBudget()*4)}
+		if not C.wasSent(c) then
+			C.normalize(holder,session)
+			C.capture(session)
+			return nil,"Build не отправлен: "..message.." · перепроверю этот этап без ожидания несуществующего ответа"
+		end
+		holder.createBlocked=true C.capture(session)
+		return nil,"Повтор Build пока невозможен: "..message.." · прежний отправленный запрос остаётся под наблюдением"
+	end
+	function C.preflightWake(holder,session)
+		local p=holder.preflight
+		if p and (not holder.creation or not C.wasSent(holder.creation)) and p.action==session.actionRevision and p.tries<3 then return p.nextAt end
+	end
+	function C.retryPreflight(data,session)
+		local function ready(h)
+			local p=h.preflight
+			return p and p.tries==1 and (p.kind=="position" or p.kind=="space" or p.kind=="source") and (not h.creation or not C.wasSent(h.creation))
+		end
+		if ready(data) then return true end
+		for _,h in ipairs(data.work and data.work.helpers or {}) do if ready(h) then return true end end
+		return false
+	end
+
 	local manifestFile="AutobuildRecovery.json"
 	local stateFile="AutobuildPending.json"
 	local lastManifest
@@ -3521,9 +3565,9 @@ local createOnce=(function()
 	end
 	local function packedHolder(holder)
 		local value={temporary=holder.temporary==true,deleteRequested=holder.deleteRequested==true,brick=holder.brick and holder.brick.Parent and packedBox(instanceModel(holder.brick,"checkpoint")) or nil,retired={}}
-		for _,old in ipairs(holder.retired or {}) do value.retired[#value.retired+1]={initial=packedBox(old.initial),beforeCount=old.beforeCount or 0} end
+		for _,old in ipairs(holder.retired or {}) do if C.wasSent(old) then value.retired[#value.retired+1]={initial=packedBox(old.initial),beforeCount=old.beforeCount or 0,attempts=old.attempts or 1,sentUnix=old.sentUnix} end end
 		local c=holder.creation
-		if c then value.creation={initial=packedBox(c.initial),mode=c.mode,face=FaceSymbols[c.face],clone=c.expectedClone==true,beforeCount=c.beforeCount or 0,attempts=c.attempts or 1,sentUnix=c.sentUnix,source= c.source and c.source.Parent and packedSource(instanceModel(c.source,"checkpoint")) or nil} end
+		if C.wasSent(c) then value.creation={initial=packedBox(c.initial),mode=c.mode,face=FaceSymbols[c.face],clone=c.expectedClone==true,beforeCount=c.beforeCount or 0,attempts=c.attempts or 1,sentUnix=c.sentUnix,source= c.source and c.source.Parent and packedSource(instanceModel(c.source,"checkpoint")) or nil} end
 		return value
 	end
 		local function checkpointIndices(session,persist)
@@ -3641,7 +3685,7 @@ local createOnce=(function()
 				result.retired={}
 				for _,old in ipairs(type(saved.retired)=="table" and saved.retired or {}) do
 					local initial=type(old)=="table" and box(old.initial)
-					if initial then
+					if initial and C.wasSent(old) then
 						local retired={initial=initial,candidates={},seen={},before={}}
 						if type(old.beforeCount)=="number" and old.beforeCount>0 then for _,p in ipairs(descendants(folder,initial)) do if ownPart(p,folder) and same(p,initial) then retired.before[p]=true end end end
 						result.retired[#result.retired+1]=retired
@@ -3650,7 +3694,7 @@ local createOnce=(function()
 				if type(saved.creation)=="table" then
 					local c=saved.creation local initial=box(c.initial) local source
 					if type(c.source)=="string" then local parsed,bad=parseBlocks(c.source,Vector3.zero) if bad==0 and #parsed==1 then source=unique({pos=parsed[1].centerPos,size=parsed[1].size}) end end
-					if initial and (c.mode=="normal" or c.mode=="detailed") then
+					if initial and C.wasSent(c) and (c.mode=="normal" or c.mode=="detailed") then
 						local age=type(c.sentUnix)=="number" and math.clamp(os.time()-c.sentUnix-1,0,600) or 0
 						result.creation={initial=initial,mode=c.mode,face=FaceSymbolsReverse[c.face] or Enum.NormalId.Top,expectedClone=c.clone==true,source=source,candidates={},seen={},before={},beforeCount=type(c.beforeCount)=="number" and math.max(0,c.beforeCount) or 0,attempts=type(c.attempts)=="number" and math.clamp(c.attempts,1,10000) or 1,sentAt=os.clock()-age,sentUnix=os.time()-age}
 						if result.creation.beforeCount>0 then for _,p in ipairs(descendants(folder,initial)) do if ownPart(p,folder) and same(p,initial) then result.creation.before[p]=true end end end
@@ -3730,11 +3774,12 @@ local createOnce=(function()
 		return found
 	end
 	local function accept(holder,part,session)
-		local c=holder.creation c.connection:Disconnect() active[c]=nil holder.creation=nil holder.brick=part holder.createBlocked=nil
+		local c=holder.creation c.connection:Disconnect() active[c]=nil holder.creation=nil holder.brick=part holder.createBlocked=nil holder.preflight=nil
 		if c.sentAt and c.attempts==1 then StudioHooks.timing.observed("create",os.clock()-c.sentAt) end
 		C.capture(session,false) return part
 	end
 	function C.inspect(holder,session)
+		C.normalize(holder,session)
 		local folder=getPlayerBricksFolder() if not folder then return false,"Нет вашей папки блоков" end
 		local c=holder.creation
 		if c then
@@ -3756,6 +3801,7 @@ local createOnce=(function()
 		return true
 	end
 	function C.create(holder,source,face,initial,mode,session,label)
+		C.normalize(holder,session)
 		if holder.brick and holder.brick.Parent then return holder.brick end
 		local folder=getPlayerBricksFolder() if not folder then return nil,"Нет вашей папки блоков" end
 		local c=holder.creation
@@ -3799,42 +3845,48 @@ local createOnce=(function()
 			end
 			found,reason=resolve(c,folder,holder,session) if found then return accept(holder,found,session) end
 			if reason then break end
-			local tool=awaitTool("Build") if not tool then break end
+			local tool=awaitTool("Build") if not tool then return C.preflightFailure(holder,c,session,"tool","инструмент Build недоступен") end
 			local currentSource=c.source
 			if c.expectedClone and (not currentSource or not currentSource.Parent) then
 				-- The source has been removed, so this recipe cannot be sent again.
 				-- Keep its listener alive while the executor replans the missing stage.
+				if not C.wasSent(c) then return C.preflightFailure(holder,c,session,"source","источник копирования изменился; нужен новый рецепт") end
 				holder.retired=holder.retired or {} holder.retired[#holder.retired+1]=c
 				holder.creation=nil holder.createBlocked=true C.capture(session)
 				return nil,"Источник прежнего создания исчез; пересчитаю этот этап после сверки мира"
 			end
 			if currentSource then
-				if not currentSource.Parent or not currentSource.Anchored then break end
+				if not currentSource.Parent or not currentSource.Anchored then return C.preflightFailure(holder,c,session,"source","источник копирования удалён или не закреплён") end
 				local prediction
 				for _,d in ipairs(Planner.directions) do if d.face==c.face then prediction=currentSource.Position+d.unit*currentSource.Size[d.axis] break end end
 				if not prediction or (prediction-c.initial.pos).Magnitude>.03 or (currentSource.Size-c.initial.size).Magnitude>.03 then
-					holder.retired=holder.retired or {} holder.retired[#holder.retired+1]=c holder.creation=nil holder.createBlocked=true C.capture(session)
+					if not C.wasSent(c) then return C.preflightFailure(holder,c,session,"source","источник копирования изменился; нужен новый рецепт") end
+				holder.retired=holder.retired or {} holder.retired[#holder.retired+1]=c holder.creation=nil holder.createBlocked=true C.capture(session)
 					return nil,"Источник изменился; пересчитаю этап, старый ответ остаётся под наблюдением"
 				end
 			end
 			local input=currentSource and facePoint(instanceModel(currentSource,"input"),c.face) or c.initial.pos
 			if not currentSource and c.mode=="detailed" then input+=CONFIG.DETAILED_INPUT_OFFSET end
-			if not ensureNear(input,currentSource and currentSource.Position or nil,c.attempts>0) then break end
+			local near,nearError=ensureNear(input,currentSource and currentSource.Position or nil,c.attempts>0 or holder.preflight and holder.preflight.kind=="position")
+			if not near then return C.preflightFailure(holder,c,session,"position",nearError or "не удалось подойти к точке создания") end
 			found,reason=resolve(c,folder,holder,session) if found then return accept(holder,found,session) end
 			local obstacles=snapshotWorld(session,true,c.initial)
 			if StudioHooks.guard then
 				local cleared,changed=StudioHooks.guard.clearBox(session,c.initial,currentSource,obstacles)
-				if not cleared then holder.createBlocked=true return nil,changed end
+				if not cleared then return C.preflightFailure(holder,c,session,"space",tostring(changed)) end
 				if changed then obstacles=snapshotWorld(session,true,c.initial) end
 			end
 			for n=#obstacles,1,-1 do if obstacles[n].reservedHolder==holder then table.remove(obstacles,n) end end
-			if not Planner.safeBox(c.initial,holder.finalModel or c.initial,obstacles,nil,holder.temporary==true) then break end
+			if not Planner.safeBox(c.initial,holder.finalModel or c.initial,obstacles,nil,holder.temporary==true) then return C.preflightFailure(holder,c,session,"space","начальный объём занят блоком или отправленным запросом другой детали") end
 			if cancelled() then return nil,"Пауза; ожидание сохранено" end
 			if session.lastCreateSent then
 				if not waitUntil(function() return os.clock()-session.lastCreateSent>=StudioHooks.timing.pace() end,math.max(.5,StudioHooks.timing.pace()+.1)) then return nil,"Пауза; ожидание сохранено" end
 			end
 			found,reason=resolve(c,folder,holder,session) if found then return accept(holder,found,session) end
 			if reason then break end
+			tool=findTool("Build")
+			if not tool then return C.preflightFailure(holder,c,session,"tool","Build пропал во время подготовки") end
+			holder.preflight=nil
 			c.roundAttempts+=1 c.attempts+=1 c.sentAt=os.clock() c.sentUnix=os.time()
 			session.lastCreateSent=c.sentAt
 			C.capture(session)
@@ -3856,6 +3908,7 @@ local createOnce=(function()
 	function C.nextWake(data,session)
 		local wake
 		local function include(holder)
+			local preflight=C.preflightWake(holder,session) if preflight then wake=math.min(wake or math.huge,preflight) end
 			local c=holder.creation
 			if not c or not c.sentAt or (c.attempts or 0)==0 then return end
 			local deadline=c.sentAt+math.max(10,roundTripPing()*8+1)+math.max(.2,roundTripPing()*2)
@@ -4141,6 +4194,8 @@ StudioHooks.control=(function()
 		return true
 	end
 	function C.execute(data,index,session)
+		StudioHooks.recovery.normalize(data,session)
+		for _,h in ipairs(data.work and data.work.helpers or {}) do StudioHooks.recovery.normalize(h,session) end
 		session.activeIndex=index data.repairInterrupt=nil data.replans=0
 		local function attempt()
 			if session.transient and StudioHooks.recovery.arrived(data,session) then
@@ -4159,6 +4214,10 @@ StudioHooks.control=(function()
 		end
 		local ran,ok,err=pcall(attempt)
 		if not ran then err=tostring(ok) ok=false end
+		if not ok and not cancelled() and StudioHooks.recovery.retryPreflight(data,session) then
+			task.wait(StudioHooks.timing.pace())
+			ran,ok,err=pcall(attempt) if not ran then err=tostring(ok) ok=false end
+		end
 		if data.repairInterrupt and not data.skipped and not unloaded and not _G.stopautobuild then
 			data.repairInterrupt=nil
 			ran,ok,err=pcall(attempt) if not ran then err=tostring(ok) ok=false end
@@ -4582,7 +4641,8 @@ local function runBuilderEngine(buildString,offset,prepareOnly)
 					if cancelled() then return false,"Пауза; незавершённые блоки сохранены" end
 					if ok then finish(i,data) elseif not data.skipped then setStatus("Блок №"..i..": "..tostring(err),true) end
 					local afterHelpers=0 for _,h in ipairs(data.work and data.work.helpers or {}) do if h.creation then afterHelpers+=1 end end
-					if not ok and beforeCreates==session.actual.creates and beforeCreation==data.creation and beforeHelpers==afterHelpers and (arrived or due and due<=os.clock() or data.repairRequested) then
+					local nextDue=StudioHooks.recovery.nextWake(data,session)
+					if not ok and beforeCreates==session.actual.creates and beforeCreation==data.creation and beforeHelpers==afterHelpers and (arrived or due and due<=os.clock() or data.repairRequested) and (not nextDue or nextDue<=os.clock()) then
 						parked[i]=true -- Geometry/repair cannot progress; keep its requests, never spin on this target.
 					end
 				end
@@ -5384,7 +5444,7 @@ StudioHooks.stairwell=(function()
 	function S.fastPlan(targets,scene,options)
 		options=options or {} local byGeometry,placed={},{ } local obstacles=table.clone(scene) local index=Planner.spatial(obstacles) local targetIndex=Planner.spatial(targets)
 		for _,m in ipairs(scene) do if m.eligible then byGeometry[geometryKey(m)]=m end if m.instance and type(m.id)=="string" and m.id:match("^t:%d+$") then placed[m.id]=m end end
-		local plan={name="Stairwell · готовые модули",items={},operations=0,shapeSteps=0,helpers=0,alternatives={},templateVersion=24}
+		local plan={name="Stairwell · готовые модули",items={},operations=0,shapeSteps=0,helpers=0,alternatives={},templateVersion=25}
 		local blueprints=options.blueprints or {} local compiledCount=0 local cacheHits=0
 		for i,target in ipairs(targets) do
 			if options.cancelled and options.cancelled() then error("Подготовка остановлена",0) end
@@ -5449,6 +5509,11 @@ StudioHooks.stairwell=(function()
 		return plan
 	end
 
+	function S.lightColor(level)
+		local brightness=level<=20 and 255-(level-1)*7 or 122-(level-20)*2
+		brightness=math.clamp(brightness,0,255)/255
+		return Color3.new(brightness,brightness,brightness)
+	end
 	function S.module(origin,direction,drop,level,turn,options)
 		options=options or S.options
 		local rows,routes,reserved={},{},{} local exits={} local corners={}
@@ -5471,8 +5536,8 @@ StudioHooks.stairwell=(function()
 			return r
 		end
 		local function part(lo,hi,neon,start,heading,hazard)
-			if hi.X<=lo.X or hi.Y<=lo.Y or hi.Z<=lo.Z then return end
-			local r=transform(lo,hi,start,heading) r.color=color r.material=neon and Enum.Material.Neon or Enum.Material.Brick r.level=level r.hazard=hazard==true
+			if hi.X<=lo.X or hi.Y<=lo.Y or hi.Z<=lo.Z or neon and not hazard and level>50 then return end
+			local r=transform(lo,hi,start,heading) r.color=hazard and Color3.new(0,0,0) or neon and S.lightColor(level) or color r.material=neon and Enum.Material.Neon or Enum.Material.Brick r.level=level r.hazard=hazard==true
 			rows[#rows+1]=r
 		end
 		local function cubes(lo,hi,start,heading,hazard)
@@ -5540,7 +5605,7 @@ StudioHooks.stairwell=(function()
 				cubes(Vector3.new(4,bottom,z),Vector3.new(8,base+12,z+4),start,heading)
 
 				cubes(Vector3.new(-4,base+12,z),Vector3.new(4,base+16,z+4),start,heading)
-				if not broken and z==4 and level%3==0 then part(Vector3.new(-.0,base+10,z+1),Vector3.new(1,base+11,z+2),true,start,heading) end
+				if not broken and (z==0 or z%8==0) and level<=50 then part(Vector3.new(-.0,base+10,z+1),Vector3.new(1,base+11,z+2),true,start,heading) end
 			end
 			local height=up and length or -length
 			return start+heading*length+Vector3.new(0,height,0),height
@@ -5722,17 +5787,17 @@ StudioHooks.stairwell=(function()
 		end
 		local color=Color3.new(math.clamp(math.round(255*(20-level)/19),0,255)/255,math.clamp(math.round(255*(20-level)/19),0,255)/255,math.clamp(math.round(255*(20-level)/19),0,255)/255)
 		local rows,routes,reserved,points,guards={},{},{},{},{}
-		for _,r in ipairs(template.rows) do
+		for _,r in ipairs(template.rows) do if r[7]~="light" or level<=50 then
 			local size=Vector3.new(r[4],r[5],r[6])
 			if math.abs(direction.X*localDirection.Z-direction.Z*localDirection.X)>.5 then size=Vector3.new(size.Z,size.Y,size.X) end
-			rows[#rows+1]={pos=transform({r[1],r[2],r[3]}),size=size,color=color,material=r[7]=="light" and Enum.Material.Neon or Enum.Material.Brick,level=level,isWall=r[7]=="wall",role=r[7]}
-		end
+			rows[#rows+1]={pos=transform({r[1],r[2],r[3]}),size=size,color=r[7]=="light" and S.lightColor(level) or color,material=r[7]=="light" and Enum.Material.Neon or Enum.Material.Brick,level=level,isWall=r[7]=="wall",role=r[7]}
+		end end
 		local function volume(lo,hi,o,h)
 			local s=Vector3.new(h.Z,0,-h.X) local p=(lo+hi)/2 local size=hi-lo
 			return {pos=o+s*p.X+Vector3.new(0,p.Y,0)+h*p.Z,size=h.X~=0 and Vector3.new(size.Z,size.Y,size.X) or size}
 		end
 		local function block(lo,hi,o,h,role,hazard)
-			local r=volume(lo,hi,o,h) r.color=color r.material=hazard and Enum.Material.Neon or Enum.Material.Brick
+			local r=volume(lo,hi,o,h) r.color=hazard and Color3.new(0,0,0) or color r.material=hazard and Enum.Material.Neon or Enum.Material.Brick
 			r.level=level r.isWall=role=="wall" r.role=role r.hazard=hazard r.hazardKind=hazard and "pit" or nil
 			rows[#rows+1]=r
 		end
@@ -6744,7 +6809,7 @@ for i,item in ipairs({{"floors","Уровней · 0 = ∞","6"},{"rise","Пер
 	label(stairWindow,item[2],UDim2.fromOffset(16+(i-1)*112,112),UDim2.fromOffset(104,22),10,"muted")
 	local f=field(stairWindow,item[3],UDim2.fromOffset(16+(i-1)*112,140),UDim2.fromOffset(104,32)) f.Name="Stairwell_"..item[1] stairFields[item[1]]=f
 end
-label(stairWindow,"Вход у ног, без пола. Повороты с закрытыми стыками.\nКрасные toxic-стены сбоку · проход остаётся широким.\nРедкий свет · надписи на английском · темно с 20-го.\nЛюбое число этажей; 0 / ∞ — до ручной остановки.",UDim2.fromOffset(16,184),UDim2.new(1,-32,0,70),10,"muted")
+label(stairWindow,"Вход у ног, без пола. Повороты с закрытыми стыками.\nКрасные toxic-стены сбоку · проход остаётся широким.\nСвет в переходах до 50-й · стены чёрные с 20-й.\nЛюбое число этажей; 0 / ∞ — до ручной остановки.",UDim2.fromOffset(16,184),UDim2.new(1,-32,0,70),10,"muted")
 local stairPreview=button(stairWindow,"Генерация",UDim2.fromOffset(16,264),UDim2.fromOffset(160,32),"primary") stairPreview.Name="GenerateStairwell"
 local stairRegenerate=button(stairWindow,"Другой вариант",UDim2.fromOffset(184,264),UDim2.fromOffset(160,32),"soft") stairRegenerate.Name="RegenerateStairwell"
 local stairBuild=button(stairWindow,"Строить / продолжить",UDim2.fromOffset(16,306),UDim2.fromOffset(160,32),"soft") stairBuild.Name="BuildStairwell"
@@ -7862,4 +7927,4 @@ unloadScript = function()
 end
 
 _G.AUTOBUILD_UNLOAD = unloadScript
-setStatus("ORBIT stairwell-24: комнаты hui, полы и стены, токсичные стены до 5%")
+setStatus("ORBIT recovery-25: исправлены неотправленные создания; свет до 50-й комнаты")
