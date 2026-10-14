@@ -802,7 +802,7 @@ local function updateDefaultStats()
 end
 
 btnLog.MouseButton1Click:Connect(function()
-	local text="Autobuild Studio v5 / ORBIT · stairwell-22\n"..table.concat(diagnosticLog,"\n")
+	local text="Autobuild Studio v5 / ORBIT · stairwell-23\n"..table.concat(diagnosticLog,"\n")
 	if storageError then text=text.."\nStorage: "..storageError end
 	if copyText(text) then setStatus("Диагностика скопирована") else setStatus("Буфер обмена недоступен",true) end
 end)
@@ -5384,7 +5384,7 @@ StudioHooks.stairwell=(function()
 	function S.fastPlan(targets,scene,options)
 		options=options or {} local byGeometry,placed={},{ } local obstacles=table.clone(scene) local index=Planner.spatial(obstacles) local targetIndex=Planner.spatial(targets)
 		for _,m in ipairs(scene) do if m.eligible then byGeometry[geometryKey(m)]=m end if m.instance and type(m.id)=="string" and m.id:match("^t:%d+$") then placed[m.id]=m end end
-		local plan={name="Stairwell · готовые модули",items={},operations=0,shapeSteps=0,helpers=0,alternatives={},templateVersion=22}
+		local plan={name="Stairwell · готовые модули",items={},operations=0,shapeSteps=0,helpers=0,alternatives={},templateVersion=23}
 		local blueprints=options.blueprints or {} local compiledCount=0 local cacheHits=0
 		for i,target in ipairs(targets) do
 			if options.cancelled and options.cancelled() then error("Подготовка остановлена",0) end
@@ -5451,7 +5451,7 @@ StudioHooks.stairwell=(function()
 
 	function S.module(origin,direction,drop,level,turn,options)
 		options=options or S.options
-		local rows,routes,reserved={},{},{} local exits={}
+		local rows,routes,reserved={},{},{} local exits={} local corners={}
 		local seed=options.seed or 1
 		local function noise(salt)
 			local n=(seed+level*104729+salt*69621)%2147483647
@@ -5497,6 +5497,7 @@ StudioHooks.stairwell=(function()
 		if level>1 then
 			cubes(Vector3.new(-8,0,0),Vector3.new(-4,12,4))
 			cubes(Vector3.new(4,0,0),Vector3.new(width-8,12,4))
+			cubes(Vector3.new(-4,8,0),Vector3.new(4,12,4))
 		end
 		if not exits.straight then cubes(Vector3.new(-8,0,depth-4),Vector3.new(width-8,12,depth))
 		else
@@ -5553,18 +5554,26 @@ StudioHooks.stairwell=(function()
 			for bend=1,bends do
 				local raised=flight(start,heading,4,true)
 				local lo,hi=sign==1 and -4 or -12,sign==1 and 12 or 4
+				corners[#corners+1]={origin=raised,direction=heading,lo=lo,hi=hi,sign=sign}
 				cubes(Vector3.new(lo,-4,0),Vector3.new(hi,0,16),raised,heading)
 				cubes(Vector3.new(lo,12,0),Vector3.new(hi,16,16),raised,heading)
+				-- Close the front beside the incoming door and its 4-stud ceiling step.
+				cubes(Vector3.new(lo,0,0),Vector3.new(-4,8,4),raised,heading)
+				cubes(Vector3.new(4,0,0),Vector3.new(hi,8,4),raised,heading)
+				cubes(Vector3.new(lo,8,0),Vector3.new(hi,12,4),raised,heading)
 				cubes(Vector3.new(lo,0,16),Vector3.new(hi,12,20),raised,heading)
 				local closed=sign==1 and lo-4 or hi
 				cubes(Vector3.new(closed,0,0),Vector3.new(closed+4,12,16),raised,heading)
 				local opened=sign==1 and hi or lo-4
 				cubes(Vector3.new(opened,0,0),Vector3.new(opened+4,12,4),raised,heading)
 				cubes(Vector3.new(opened,0,12),Vector3.new(opened+4,12,16),raised,heading)
+				cubes(Vector3.new(closed,0,16),Vector3.new(closed+4,12,20),raised,heading)
+				cubes(Vector3.new(opened,0,16),Vector3.new(opened+4,12,20),raised,heading)
 				cubes(Vector3.new(opened,-4,4),Vector3.new(opened+4,0,12),raised,heading)
 				cubes(Vector3.new(opened,12,4),Vector3.new(opened+4,16,12),raised,heading)
 				passage(Vector3.new(opened,0,4),Vector3.new(opened+4,8,12),raised,heading)
-				passage(Vector3.new(lo,0,0),Vector3.new(hi,8,16),raised,heading)
+				passage(Vector3.new(-4,0,0),Vector3.new(4,8,4),raised,heading)
+				passage(Vector3.new(lo,0,4),Vector3.new(hi,8,16),raised,heading)
 				local side=Vector3.new(heading.Z,0,-heading.X)*sign
 				routePoints[#routePoints+1]=raised routePoints[#routePoints+1]=raised+heading*8
 				start=raised+heading*8+side*16 heading=side sign=-sign
@@ -5593,19 +5602,65 @@ StudioHooks.stairwell=(function()
 		local solidBounds=bounds(rows)
 		local signText
 		if level>1 and noise(12)%4==0 then
-			local phrases={"НЕ СЧИТАЙ ЭТАЖИ", "СТЕНА СЛУШАЕТ", "Я УЖЕ БЫЛ ЗДЕСЬ", "ДВЕРЬ СНОВА ОТКРЫТА", "НЕ ОТВЕЧАЙ СТУКУ", "ВЫШЕ НИКТО НЕ ЖДЁТ"}
+			local phrases={"DO NOT COUNT THE FLOORS", "THE WALL IS LISTENING", "I HAVE BEEN HERE BEFORE", "THE DOOR IS OPEN AGAIN", "DO NOT ANSWER THE KNOCK", "NO ONE IS WAITING ABOVE"}
 			local face=direction.Z>0 and Enum.NormalId.Front or direction.Z<0 and Enum.NormalId.Back or direction.X>0 and Enum.NormalId.Left or Enum.NormalId.Right
 			local wanted=transform(Vector3.new(4,4,depth-4),Vector3.new(8,8,depth)).pos
 			for _,row in ipairs(rows) do if (row.pos-wanted).Magnitude<.01 and not row.hazard then
 				row.sprays={{face=face,text=phrases[noise(13)%#phrases+1],colorHex=shade>128 and "222222" or "B8B0A0"}} signText=row break
 			end end
 		end
-		return {rows=rows,routes=routes,reserved=reserved,routePoints=routePoints,origin=origin,nextOrigin=nextOrigin,nextDirection=nextDirection,turn=turn,level=level,branch=branch,style=style,wallDanger=wallDanger,signText=signText,bounds=solidBounds,clearBounds=solidBounds}
+		return {rows=rows,routes=routes,reserved=reserved,routePoints=routePoints,origin=origin,nextOrigin=nextOrigin,nextDirection=nextDirection,turn=turn,level=level,branch=branch,style=style,wallDanger=wallDanger,signText=signText,room={origin=origin,direction=direction,width=width,depth=depth,exits=exits},corners=corners,bounds=solidBounds,clearBounds=solidBounds}
+	end
+
+	-- Doors are explicit ports. Every other shell cell must remain closed.
+	function S.validateShell(floor,index)
+		if not floor.room then return true end
+		index=index or Planner.spatial(floor.rows)
+		local function check(origin,heading,x,y,z,solid)
+			local side=Vector3.new(heading.Z,0,-heading.X)
+			local sample={pos=origin+side*x+Vector3.new(0,y,0)+heading*z,size=Vector3.new(.02,.02,.02)}
+			local occupied=false
+			for _,row in ipairs(index:query(sample)) do if Planner.intersects(sample,row) then occupied=true break end end
+			return occupied==solid
+		end
+		local room=floor.room local o,h,w,d=room.origin,room.direction,room.width,room.depth
+		for x=-6,w-10,4 do for y=2,10,4 do
+			if floor.level>1 and not check(o,h,x,y,2,y>=8 or x<-4 or x>=4) then return false,"room entrance seam" end
+			if not check(o,h,x,y,d-2,not (room.exits.straight and x>=-4 and x<4)) then return false,"room back wall" end
+		end end
+		for z=2,d-2,4 do for y=2,10,4 do
+			if floor.level>1 or z>2 then
+				local opening=z>=d-12 and z<d-4
+				if not check(o,h,-6,y,z,not (room.exits.left and opening)) then return false,"room left wall" end
+				if not check(o,h,w-10,y,z,not (room.exits.right and opening)) then return false,"room right wall" end
+			end
+		end end
+		if floor.level>1 then for x=-2,w-14,4 do for z=2,d-2,4 do
+			if not check(o,h,x,-2,z,true) or not check(o,h,x,14,z,true) then return false,"room floor/roof" end
+		end end end
+		for _,corner in ipairs(floor.corners or {}) do
+			local start,heading,lo,hi=corner.origin,corner.direction,corner.lo,corner.hi
+			local closed=corner.sign==1 and lo-4 or hi local opened=corner.sign==1 and hi or lo-4
+			for x=lo+2,hi-2,4 do
+				for y=2,10,4 do
+					if not check(start,heading,x,y,2,y>=8 or x<-4 or x>=4) then return false,"corner entrance seam" end
+					if not check(start,heading,x,y,18,true) then return false,"corner back wall" end
+				end
+				for z=2,14,4 do if not check(start,heading,x,-2,z,true) or not check(start,heading,x,14,z,true) then return false,"corner floor/roof" end end
+			end
+			for z=2,18,4 do for y=2,10,4 do
+				if not check(start,heading,closed+2,y,z,true) then return false,"corner closed side" end
+				if not check(start,heading,opened+2,y,z,not (z>=4 and z<12)) then return false,"corner outlet" end
+			end end
+			for z=6,10,4 do if not check(start,heading,opened+2,-2,z,true) or not check(start,heading,opened+2,14,z,true) then return false,"corner doorway bridge" end end
+		end
+		return true
 	end
 
 	local function clear(candidate,previous,obstacles)
 		local solids,passages,world={},{},{}
 		local own=Planner.spatial(candidate.rows)
+		if not S.validateShell(candidate,own) then return false end
 		for _,row in ipairs(candidate.rows) do
 			for _,other in ipairs(own:query(row)) do if row~=other and Planner.intersects(row,other) then return false end end
 		end
@@ -6543,7 +6598,7 @@ for i,item in ipairs({{"floors","Уровней · 0 = ∞","6"},{"rise","Пер
 	label(stairWindow,item[2],UDim2.fromOffset(16+(i-1)*112,112),UDim2.fromOffset(104,22),10,"muted")
 	local f=field(stairWindow,item[3],UDim2.fromOffset(16+(i-1)*112,140),UDim2.fromOffset(104,32)) f.Name="Stairwell_"..item[1] stairFields[item[1]]=f
 end
-label(stairWindow,"Вход у ног, без пола. Больше поворотов на площадках.\nКрасные toxic-стены сбоку · проход остаётся широким.\nРедкий свет и тревожные надписи · темно с 20-го.\nЛюбое число этажей; 0 / ∞ — до ручной остановки.",UDim2.fromOffset(16,184),UDim2.new(1,-32,0,70),10,"muted")
+label(stairWindow,"Вход у ног, без пола. Повороты с закрытыми стыками.\nКрасные toxic-стены сбоку · проход остаётся широким.\nРедкий свет · надписи на английском · темно с 20-го.\nЛюбое число этажей; 0 / ∞ — до ручной остановки.",UDim2.fromOffset(16,184),UDim2.new(1,-32,0,70),10,"muted")
 local stairPreview=button(stairWindow,"Генерация",UDim2.fromOffset(16,264),UDim2.fromOffset(160,32),"primary") stairPreview.Name="GenerateStairwell"
 local stairRegenerate=button(stairWindow,"Другой вариант",UDim2.fromOffset(184,264),UDim2.fromOffset(160,32),"soft") stairRegenerate.Name="RegenerateStairwell"
 local stairBuild=button(stairWindow,"Строить / продолжить",UDim2.fromOffset(16,306),UDim2.fromOffset(160,32),"soft") stairBuild.Name="BuildStairwell"
@@ -7661,4 +7716,4 @@ unloadScript = function()
 end
 
 _G.AUTOBUILD_UNLOAD = unloadScript
-setStatus("ORBIT stairwell-22: бесконечный подъём, повороты, красные стены и надписи")
+setStatus("ORBIT stairwell-23: закрытые стыки, обход построек и английские надписи")
