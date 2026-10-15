@@ -803,7 +803,7 @@ local function updateDefaultStats()
 end
 
 btnLog.MouseButton1Click:Connect(function()
-	local text="Autobuild Studio v5 / ORBIT · recovery-25\n"..table.concat(diagnosticLog,"\n")
+	local text="Autobuild Studio v5 / ORBIT · stairwell-26\n"..table.concat(diagnosticLog,"\n")
 	if storageError then text=text.."\nStorage: "..storageError end
 	if copyText(text) then setStatus("Диагностика скопирована") else setStatus("Буфер обмена недоступен",true) end
 end)
@@ -5444,7 +5444,7 @@ StudioHooks.stairwell=(function()
 	function S.fastPlan(targets,scene,options)
 		options=options or {} local byGeometry,placed={},{ } local obstacles=table.clone(scene) local index=Planner.spatial(obstacles) local targetIndex=Planner.spatial(targets)
 		for _,m in ipairs(scene) do if m.eligible then byGeometry[geometryKey(m)]=m end if m.instance and type(m.id)=="string" and m.id:match("^t:%d+$") then placed[m.id]=m end end
-		local plan={name="Stairwell · готовые модули",items={},operations=0,shapeSteps=0,helpers=0,alternatives={},templateVersion=25}
+		local plan={name="Stairwell · готовые модули",items={},operations=0,shapeSteps=0,helpers=0,alternatives={},templateVersion=26}
 		local blueprints=options.blueprints or {} local compiledCount=0 local cacheHits=0
 		for i,target in ipairs(targets) do
 			if options.cancelled and options.cancelled() then error("Подготовка остановлена",0) end
@@ -5592,7 +5592,10 @@ StudioHooks.stairwell=(function()
 			for z=0,length-1 do
 				local base=up and math.floor(z/4)*4 or -4*(math.floor(z/4)+1)
 				local height=up and (z%4+1) or (4-z%4)
-				if not broken or z<length-2 then for x=-4,0,4 do part(Vector3.new(x,base,z),Vector3.new(x+4,base+height,z+1),false,start,heading) end end
+				if not broken or z<length-2 then for x=-4,0,4 do
+					part(Vector3.new(x,base,z),Vector3.new(x+4,base+height,z+1),false,start,heading)
+					if broken and rows[#rows] then rows[#rows].collide=false end
+				end end
 				if not broken then passage(Vector3.new(-4,base+height,z),Vector3.new(4,base+height+8,z+1),start,heading) end
 			end
 			for z=0,length-4,4 do
@@ -5655,12 +5658,11 @@ StudioHooks.stairwell=(function()
 			flight(start,heading,8,up,true,bottom)
 			-- Closed under the broken stairs as well: falling never exits the shell.
 			cubes(Vector3.new(-4,bottom-4,0),Vector3.new(4,bottom,20),start,heading,true)
-			cubes(Vector3.new(-4,bottom,0),Vector3.new(4,-4,4),start,heading)
+			-- Leave the shaft open beneath the ghost steps; only the toxic bottom catches a fall.
 			cubes(Vector3.new(-8,bottom,8),Vector3.new(-4,height+12,24),start,heading)
 			cubes(Vector3.new(4,bottom,8),Vector3.new(8,height+12,24),start,heading)
 			cubes(Vector3.new(-4,bottom,20),Vector3.new(4,height+12,24),start,heading)
 			cubes(Vector3.new(-4,height+12,8),Vector3.new(4,height+16,24),start,heading)
-			cubes(Vector3.new(-4,bottom,8),Vector3.new(4,height-4,12),start,heading)
 			cubes(Vector3.new(-4,height+8,8),Vector3.new(4,height+12,12),start,heading)
 			reserved[#reserved+1]=transform(Vector3.new(-4,bottom,0),Vector3.new(4,height+8,20),start,heading)
 			branch={exit=fake,up=up,broken=true,bottom=bottom,start=start,direction=heading,height=height}
@@ -5762,11 +5764,11 @@ StudioHooks.stairwell=(function()
 	end
 	function S.pickTemplate(seed,level)
 		-- Existing rooms retain half the pool. The two special rooms have 80% weight.
-		local total=4.4 for _,t in ipairs(S.templates) do total+=t.weight end
+		local total=4.4 for _,t in ipairs(S.templates) do if t.name~="square" then total+=t.weight end end
 		local n=randomUnit(seed,level,731)*total
 		if n<4.4 then return nil end n-=4.4
-		for _,t in ipairs(S.templates) do n-=t.weight if n<0 then return t end end
-		return S.templates[#S.templates]
+		for _,t in ipairs(S.templates) do if t.name~="square" then n-=t.weight if n<0 then return t end end end
+		return nil
 	end
 	function S.templateModule(template,origin,direction,drop,level,turn,options)
 		local entries,exits=S.portChoices(template)
@@ -5824,8 +5826,7 @@ StudioHooks.stairwell=(function()
 					cubes(Vector3.new(4,-16,0),Vector3.new(8,12,20),o,h,"wall")
 					cubes(Vector3.new(-4,-16,16),Vector3.new(4,12,20),o,h,"wall")
 					cubes(Vector3.new(-4,12,0),Vector3.new(4,16,20),o,h,"roof")
-					cubes(Vector3.new(-4,-16,0),Vector3.new(4,0,4),o,h,"structure")
-					for z=0,3 do block(Vector3.new(-4,0,z),Vector3.new(4,z+1,z+1),o,h,"stair") end
+					for z=0,3 do block(Vector3.new(-4,0,z),Vector3.new(4,z+1,z+1),o,h,"stair") rows[#rows].collide=false end
 					reserved[#reserved+1]=volume(Vector3.new(-4,-16,4),Vector3.new(4,12,16),o,h)
 					branch=branch or {start=o,direction=h,height=4,broken=true}
 				else
@@ -6019,7 +6020,7 @@ StudioHooks.stairwell=(function()
 		local visuals={} S.previewRows[level]=visuals local renderYield=os.clock()
 		for i,row in ipairs(floor.rows) do
 			if unloaded or job~=S.job or S.running and cancelled() then error("Подготовка отменена",0) end
-			encoded[i]=serializeBlock({centerPos=row.pos,size=row.size,color=row.color,material=row.material,canCollide=true,sprays=row.sprays or {}})
+			encoded[i]=serializeBlock({centerPos=row.pos,size=row.size,color=row.color,material=row.material,canCollide=row.collide~=false,sprays=row.sprays or {}})
 			if row.hazard then meta.hazards[#meta.hazards+1]=i end
 			if S.preview then
 				local p=create("Part",{Name="Stairwell_"..level.."_"..i,Parent=S.preview,Position=row.pos,Size=row.size,Color=row.color,Material=row.hazard and Enum.Material.Brick or row.material,Transparency=.55,Anchored=true,CanCollide=false,CanTouch=false,CanQuery=false,CastShadow=false}) visuals[i]=p
@@ -7927,4 +7928,4 @@ unloadScript = function()
 end
 
 _G.AUTOBUILD_UNLOAD = unloadScript
-setStatus("ORBIT recovery-25: исправлены неотправленные создания; свет до 50-й комнаты")
+setStatus("ORBIT stairwell-26: ложные лестницы без коллизии; убрана пустая квадратная комната")
