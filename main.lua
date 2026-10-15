@@ -803,7 +803,7 @@ local function updateDefaultStats()
 end
 
 btnLog.MouseButton1Click:Connect(function()
-	local text="Autobuild Studio v5 / ORBIT · stairwell-29\n"..table.concat(diagnosticLog,"\n")
+	local text="Autobuild Studio v5 / ORBIT · stairwell-30\n"..table.concat(diagnosticLog,"\n")
 	if storageError then text=text.."\nStorage: "..storageError end
 	if copyText(text) then setStatus("Диагностика скопирована") else setStatus("Буфер обмена недоступен",true) end
 end)
@@ -5362,8 +5362,17 @@ StudioHooks.stairwell=(function()
 	end
 	function S.toxicReady(brick,data)
 		local tag=data.stairToxic if not tag then return true end
-		local meta=S.metadata[tag.id] local record=meta and meta.states[tostring(tag.index)]
-		return knownOwn(brick,data) and record and record.phase=="confirmed" and brick:GetAttribute("OrbitStairToxic")==tag.id..":"..tag.index
+		if not knownOwn(brick,data) or brick.Material~=Enum.Material.Neon or not sameColor(brick.Color,data.color) then return false end
+		local meta=S.metadata[tag.id] if not meta then return false end
+		local id=tag.id..":"..tag.index local key=tostring(tag.index)
+		local record=meta.states[key]
+		-- Rejoining removes client attributes. A matching owned Neon part is already the
+		-- finished hazard; painting it Brick first destroys the existing toxic state.
+		if not record then record={} meta.states[key]=record end
+		if record.phase~="confirmed" or brick:GetAttribute("OrbitStairToxic")~=id then
+			record.phase="confirmed" brick:SetAttribute("OrbitStairHazard",id) brick:SetAttribute("OrbitStairToxic",id) S.saveMeta(meta)
+		end
+		return true
 	end
 	function S.materialMatches(brick,data)
 		if not data.stairToxic or not data.stairToxic.defer then return brick.Material==data.material end
@@ -5374,6 +5383,7 @@ StudioHooks.stairwell=(function()
 		local tag=data.stairToxic local meta=S.metadata[tag.id] if not meta then return false end
 		local id=tag.id..":"..tag.index local key=tostring(tag.index) local record=meta.states[key]
 		if not record or brick:GetAttribute("OrbitStairHazard")~=id then record={phase="shell"} meta.states[key]=record brick:SetAttribute("OrbitStairHazard",id) S.saveMeta(meta) end
+		if S.toxicReady(brick,data) then return true end
 		if record.phase=="sent" then
 			if not waitUntil(function() return brick.Parent and brick.Material==Enum.Material.Neon end,responseTimeout(2)) then return false end
 			record.phase="confirmed" brick:SetAttribute("OrbitStairToxic",id) S.saveMeta(meta)
@@ -5381,7 +5391,7 @@ StudioHooks.stairwell=(function()
 			if not waitUntil(function() return brick.Parent and brick.Material==Enum.Material.Brick end,responseTimeout(2)) then return false end
 			record.phase="shell" S.saveMeta(meta)
 		end
-		if S.toxicReady(brick,data) and brick.Material==Enum.Material.Neon and sameColor(brick.Color,data.color) then return true end
+		if S.toxicReady(brick,data) then return true end
 		local shell=table.clone(data) shell.stairToxic=nil shell.material=Enum.Material.Brick
 		return ordinaryPaint(brick,shell)
 	end
@@ -5401,21 +5411,30 @@ StudioHooks.stairwell=(function()
 		local record=meta.states[key]
 		if not record or brick:GetAttribute("OrbitStairHazard")~=id then record={} meta.states[key]=record brick:SetAttribute("OrbitStairHazard",id) end
 		local function waitMaterial(mat) return waitUntil(function() return brick.Parent and brick.Material==mat end,responseTimeout(2)) end
-		if S.toxicReady(brick,data) and brick.Material==Enum.Material.Neon and sameColor(brick.Color,data.color) then return true end
+		if S.toxicReady(brick,data) then return true end
 		if not ensureNear(brick.Position,nil,true) then return false end
 		local tool,hrp=awaitTool("Paint"),getValidHRP() if not tool or not hrp or cancelled() then return false end
 		local function send(phase,material)
 			record.phase=phase
+			if material=="toxic" then record.sentOnce=true end
 			local ok=S.saveMeta(meta) if not ok then return false end
 			return pcall(function() tool.event:FireServer(brick,Enum.NormalId.Top,hrp.Position,"both 🤝",data.color,material,"") end)
 		end
-		-- Neon alone cannot acknowledge toxic. Observe a real material transition.
-		if record.phase=="reset" then if not waitMaterial(Enum.Material.Brick) then return false end record.phase=nil end
-		if record.phase~="sent" and brick.Material==Enum.Material.Neon then
-			if not send("reset","bricks") or not waitMaterial(Enum.Material.Brick) then return false end record.phase=nil
+		-- Never reset an already-toxic part to ordinary Brick. Reconcile an old
+		-- in-flight reset only if the material actually changed.
+		if record.phase=="reset" then
+			if S.toxicReady(brick,data) then return true end
+			if not waitMaterial(Enum.Material.Brick) then return false end
+			record.phase=nil
 		end
 		if record.phase~="sent" then if not send("sent","toxic") then return false end end
-		if not waitMaterial(Enum.Material.Neon) or not knownOwn(brick,data) or not sameColor(brick.Color,data.color) then return false end
+		if not waitMaterial(Enum.Material.Neon) then
+			-- A request that left the same owned shell Brick after the full timeout
+			-- may be retried on the next floor pass. Never resend while it is Neon.
+			if knownOwn(brick,data) and brick.Material==Enum.Material.Brick then record.phase="shell" S.saveMeta(meta) end
+			return false
+		end
+		if not knownOwn(brick,data) or not sameColor(brick.Color,data.color) then return false end
 		record.phase="confirmed" brick:SetAttribute("OrbitStairToxic",id) S.saveMeta(meta)
 		return true
 	end
@@ -5987,7 +6006,7 @@ StudioHooks.stairwell=(function()
 		for _,floor in ipairs(S.last.path) do
 			if floor.session and StudioHooks.documents.pending(floor.session) then return true end
 			local meta=floor.session and floor.session.stairMeta
-			if meta then for _,record in pairs(meta.states) do if record.phase=="sent" or record.phase=="reset" then return true end end end
+			if meta then for _,record in pairs(meta.states) do if record.phase=="sent" or record.phase=="reset" or record.sentOnce and record.phase~="confirmed" then return true end end end
 		end
 		return false
 	end
@@ -6425,7 +6444,8 @@ StudioHooks.stairwell=(function()
 					session.partials[i]={id=session.models[i].id,pos=best.Position,size=best.Size,color=best.Color,material=best.Material,collide=best.CanCollide,sprays=readSprays(best),instance=best,eligible=true}
 					session.done[i]=nil
 				elseif data.stairToxic then
-					-- Client attributes disappear on rejoin; toxic is verified again, never inferred from Neon alone.
+					-- Client attributes disappear on rejoin; reconcile an owned matching
+					-- Neon hazard without repainting it into ordinary Brick first.
 					local tag=data.stairToxic local meta=session.stairMeta
 					if not meta.states[tostring(i)] then meta.states[tostring(i)]={phase="shell"} end
 					if best:GetAttribute("OrbitStairHazard")~=tag.id..":"..i then best:SetAttribute("OrbitStairHazard",tag.id..":"..i) end
@@ -8253,4 +8273,4 @@ unloadScript = function()
 end
 
 _G.AUTOBUILD_UNLOAD = unloadScript
-setStatus("ORBIT stairwell-29: seed 67, восстановление контрольной точки и проверка дыр")
+setStatus("ORBIT stairwell-30: toxic без повторной покраски, восстановление этажа")
