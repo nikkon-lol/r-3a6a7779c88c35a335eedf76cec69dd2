@@ -803,7 +803,7 @@ local function updateDefaultStats()
 end
 
 btnLog.MouseButton1Click:Connect(function()
-	local text="Autobuild Studio v5 / ORBIT · stairwell-27\n"..table.concat(diagnosticLog,"\n")
+	local text="Autobuild Studio v5 / ORBIT · stairwell-28\n"..table.concat(diagnosticLog,"\n")
 	if storageError then text=text.."\nStorage: "..storageError end
 	if copyText(text) then setStatus("Диагностика скопирована") else setStatus("Буфер обмена недоступен",true) end
 end)
@@ -5843,6 +5843,26 @@ StudioHooks.stairwell=(function()
 		for _,r in ipairs(tail.routes) do routes[#routes+1]=r end
 		for _,r in ipairs(tail.reserved) do reserved[#reserved+1]=r end
 		for _,r in ipairs(tail.routePoints) do points[#points+1]=r end
+		if not options.legacyPort then
+			local function missing(lo,hi,o,h,role)
+				local r=volume(lo,hi,o,h)
+				for _,other in ipairs(rows) do if Planner.intersects(r,other) then return end end
+				block(lo,hi,o,h,role)
+			end
+			local function join(port,front)
+				local o,h=transform(port.pos),heading(port.heading)
+				local z0,z1=front and 0 or -4,front and 4 or 0
+				for x=port.span[1],port.span[2]-4,4 do
+					missing(Vector3.new(x,-4,z0),Vector3.new(x+4,0,z1),o,h,"floor")
+					missing(Vector3.new(x,12,z0),Vector3.new(x+4,16,z1),o,h,"roof")
+				end
+				for y=0,8,4 do
+					missing(Vector3.new(port.span[1]-4,y,z0),Vector3.new(port.span[1],y+4,z1),o,h,"wall")
+					missing(Vector3.new(port.span[2],y,z0),Vector3.new(port.span[2]+4,y+4,z1),o,h,"wall")
+				end
+			end
+			join(input,true) join(output,false)
+		end
 		local lo,hi
 		for _,r in ipairs(rows) do local a,b=r.pos-r.size/2,r.pos+r.size/2
 			lo=lo and Vector3.new(math.min(lo.X,a.X),math.min(lo.Y,a.Y),math.min(lo.Z,a.Z)) or a
@@ -6127,11 +6147,87 @@ StudioHooks.stairwell=(function()
 		end)
 		return true
 	end
-	function S.build()
+	local function stairGeometryKey(row)
+		return string.format("%.3f,%.3f,%.3f/%.3f,%.3f,%.3f",row.pos.X,row.pos.Y,row.pos.Z,row.size.X,row.size.Y,row.size.Z)
+	end
+	function S.convertTerminal()
+		local last=S.last local old=last and last.path[#last.path]
+		if not old or not old.recipe then return false,"Нет сохранённого последнего этажа" end
+		if old.recipe.turn~="end" then last.config.floors=0 S.options.floors=0 S.saveCheckpoint() return true end
+		local root=workspace:FindFirstChild("Bricks")
+		if not root then return false,"Мир блоков ещё не загрузился" end
+		local prior={} for i=math.max(1,#last.path-8),#last.path-1 do prior[#prior+1]=last.path[i] end
+		local choices={"right","left","straight"}
+		local selected,obsolete
+		for _,turn in ipairs(choices) do
+			for variant=0,3 do
+				local options=table.clone(last.config)
+				options.noBranch=variant%2==1 options.noBends=variant>=2 options.noTemplates=old.recipe.noTemplates options.legacyPort=old.recipe.legacyPort
+				local candidate=S.module(old.origin,old.direction or old.room.direction,old.recipe.rise,old.level,turn,options)
+				candidate.recipe={rise=old.recipe.rise,turn=turn,noBranch=options.noBranch,noBends=options.noBends,noTemplates=options.noTemplates,legacyPort=options.legacyPort}
+				candidate.overlay=true
+				local keep={} for _,row in ipairs(candidate.rows) do keep[stairGeometryKey(row)]=true end
+				local removed,removeKeys={},{}
+				for _,row in ipairs(old.rows) do if not keep[stairGeometryKey(row)] then
+					removed[#removed+1]={pos={row.pos.X,row.pos.Y,row.pos.Z},size={row.size.X,row.size.Y,row.size.Z}}
+					removeKeys[stairGeometryKey(row)]=true
+				end end
+				local focus=StudioHooks.liveWorld.focus(candidate.bounds,bounds(candidate.routes))
+				local filtered={}
+				for _,part in ipairs(StudioHooks.liveWorld.query(root,focus)) do
+					local key=stairGeometryKey({pos=part.Position,size=part.Size})
+					if not removeKeys[key] or not (getPlayerBricksFolder() and part:IsDescendantOf(getPlayerBricksFolder())) then filtered[#filtered+1]=part end
+				end
+				if clear(candidate,prior,filtered) then selected=candidate obsolete=removed break end
+			end
+			if selected then break end
+		end
+		if not selected then return false,"От последнего этажа нет свободного выхода; проверь окружающие блоки" end
+		selected.obsolete=obsolete selected.complete=false selected.savedHash=S.floorHash(selected) selected.savedCount=#selected.rows
+		last.count=last.count-#old.rows+#selected.rows last.path[#last.path]=selected
+		last.floor=math.min(last.floor,#last.path) last.restored=true last.config.floors=0 S.options.floors=0
+		local visuals=S.previewRows and S.previewRows[old.level] or {}
+		for _,v in pairs(visuals) do if v.Parent then v:Destroy() end end
+		if S.previewRows then S.previewRows[old.level]=nil end
+		for _,v in ipairs(S.previewRoutes and S.previewRoutes[old.level] or {}) do if v.Parent then v:Destroy() end end
+		if S.previewRoutes then S.previewRoutes[old.level]=nil end
+		if not S.saveCheckpoint() then return false,"Не удалось сохранить переход к бесконечному режиму" end
+		status("Выход с этажа "..old.level.." найден · удаляю только свои стены прохода")
+		return true
+	end
+	function S.clearObsolete(floor)
+		if not floor.obsolete then return true end
+		local root=workspace:FindFirstChild("Bricks")
+		if not root then return false,"Мир блоков ещё не загрузился" end
+		for _,item in ipairs(floor.obsolete) do
+			local row={pos=Vector3.new(item.pos[1],item.pos[2],item.pos[3]),size=Vector3.new(item.size[1],item.size[2],item.size[3])}
+			local brick
+			for _,part in ipairs(StudioHooks.liveWorld.query(root,row)) do
+				if S.matchWorld(row,part)=="owned" then if brick then return false,"Два своих блока на месте стены прохода" end brick=part end
+			end
+			if brick then
+				if cancelled() then return false,"Пауза" end
+				if not ensureNear(brick.Position) then return false,"Не удалось подойти к стене прохода" end
+				local tool=findTool("Delete") local hrp=LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+				if not tool or not hrp then return false,"Для продления конечного этажа нужен Delete" end
+				if not floor.deletePending then
+					floor.deletePending=brick
+					local sent,err=pcall(function() tool.event:FireServer(brick,hrp.Position) end)
+					if not sent then floor.deletePending=nil return false,tostring(err) end
+				end
+				if not waitUntil(function() return not brick.Parent end,responseTimeout(5)) then return false,"Удаление стены ещё не подтверждено; повтор не отправляется" end
+				floor.deletePending=nil
+			end
+		end
+		floor.obsolete=nil S.saveCheckpoint()
+		return true
+	end
+	function S.build(requestedFloors)
 		if S.running then S.cancel() return false end
 		if S.busy or _G.autobuildRunning or busySaving then status("Дождись подготовки",true) return false end
 		if not S.last or not S.last.ready then status("Сначала создай preview",true) return false end
 		if StudioHooks.extras and (StudioHooks.extras.busy or StudioHooks.extras.running) then status("Сначала останови двойника",true) return false end
+		local extendForever=tostring(requestedFloors or ""):gsub("%s","")=="0"
 		local savedSession=resumeSession local savedResume=_G.AUTOBUILD_RESUME
 		local savedTotal,savedPlaced=_G.autobuildTotal,_G.autobuildPlaced
 		local savedButton,savedStats=btnStart.Text,statDisplay.Text
@@ -6139,6 +6235,10 @@ StudioHooks.stairwell=(function()
 		if StudioHooks.guard then StudioHooks.guard.close() end
 		task.spawn(function()
 			local ok,completed,message=pcall(function()
+				if extendForever and S.last.config.floors~=0 then
+					local converted,reason=S.convertTerminal()
+					if not converted then return false,reason end
+				end
 				local level=S.last.floor
 				while true do
 					if level>#S.last.path then
@@ -6152,6 +6252,12 @@ StudioHooks.stairwell=(function()
 					if cancelled() then return false,"Пауза · продолжи в этом окне" end
 					local floor=S.last.path[level]
 					if floor.complete then S.last.floor=level+1 level+=1 continue end
+					while floor.obsolete and not cancelled() do
+						local removed,reason=S.clearObsolete(floor)
+						if removed then break end
+						status("Открываю выход этажа "..level.." · "..tostring(reason),true) task.wait(1)
+					end
+					if cancelled() then return false,"Пауза при открытии выхода" end
 					if not floor.session or not floor.session.plan then S.prepareFloor(floor,S.last.id,S.job,S.pose) end
 					local session=floor.session
 					S.context=session resumeSession=session
@@ -6226,7 +6332,7 @@ StudioHooks.stairwell=(function()
 		local record={version=27,userId=LocalPlayer.UserId,placeId=game.PlaceId,config=last.config,pose={origin=coords(S.pose.origin),heading=coords(S.pose.heading)},id=last.id,floor=last.floor,path={}}
 		for _,f in ipairs(last.path) do
 			if f.rows then f.savedHash=S.floorHash(f) end
-			record.path[#record.path+1]={level=f.level,origin=coords(f.origin),direction=coords(f.direction),recipe=f.recipe,hash=f.savedHash,count=f.savedCount or f.rows and #f.rows,complete=f.complete==true}
+			record.path[#record.path+1]={level=f.level,origin=coords(f.origin),direction=coords(f.direction),recipe=f.recipe,hash=f.savedHash,count=f.savedCount or f.rows and #f.rows,complete=f.complete==true,obsolete=f.obsolete}
 		end
 		local ok=pcall(function() writefile(checkpointFile,HttpService:JSONEncode(record)) end)
 		return ok
@@ -6336,15 +6442,22 @@ StudioHooks.stairwell=(function()
 				local root=workspace:FindFirstChild("Bricks")
 				for _=1,80 do if root or unloaded or job~=S.job then break end task.wait(.1) root=workspace:FindFirstChild("Bricks") end
 				if not root then error("Мир блоков ещё не загрузился · нажми «Восстановить» снова",0) end
-				local path,count={},0 local firstIncomplete
+				local path,count={},0 local firstIncomplete local migrated=false
 				for index,record in ipairs(saved.path) do
 					if unloaded or job~=S.job then return end
 					local o,d=vector(record.origin),vector(record.direction) local recipe=record.recipe
 					if not o or not d or type(recipe)~="table" or record.level~=index then error("Неверная запись этажа "..index,0) end
-					local opts=table.clone(config) opts.noBranch=recipe.noBranch opts.noBends=recipe.noBends opts.noTemplates=recipe.noTemplates
-					local f=S.module(o,d,recipe.rise,index,recipe.turn,opts)
-					f.recipe=recipe f.overlay=config.overlay f.savedHash=S.floorHash(f) f.savedCount=#f.rows
-					if f.savedHash~=record.hash or f.savedCount~=record.count or not S.validateShell(f) then error("Геометрия этажа "..index.." изменилась после обновления; старый файл сохранён",0) end
+					local opts=table.clone(config) opts.noBranch=recipe.noBranch opts.noBends=recipe.noBends opts.noTemplates=recipe.noTemplates opts.legacyPort=recipe.legacyPort
+					local f=S.module(o,d,recipe.rise,index,recipe.turn,opts) local floorMigrated=false
+					f.recipe=recipe f.overlay=config.overlay f.savedHash=S.floorHash(f) f.savedCount=#f.rows f.obsolete=record.obsolete
+					if f.savedHash~=record.hash and recipe.legacyPort==nil then
+						opts.legacyPort=true
+						local legacy=S.module(o,d,recipe.rise,index,recipe.turn,opts)
+						if S.floorHash(legacy)==record.hash and #legacy.rows==record.count then
+							migrated=true floorMigrated=true
+						end
+					end
+					if (not floorMigrated and (f.savedHash~=record.hash or f.savedCount~=record.count)) or not S.validateShell(f) then error("Геометрия этажа "..index.." изменилась после обновления; старый файл сохранён",0) end
 					if index>1 and (path[index-1].nextOrigin-o).Magnitude>.01 then error("Маршрут контрольной точки разорван",0) end
 					local complete,matched=S.auditFloor(f) f.complete=complete f.matched=matched
 					if not complete and not firstIncomplete then firstIncomplete=index end
@@ -6356,8 +6469,9 @@ StudioHooks.stairwell=(function()
 				S.last={id=id,path=path,count=count,floor=firstIncomplete or #path+1,config=config,ready=false,restored=true}
 				for i=1,math.max(0,S.last.floor-9) do if path[i].complete then path[i].rows=nil path[i].routes=nil path[i].reserved=nil path[i].routePoints=nil path[i].tail=nil path[i].templateTransform=nil end end
 				S.preview=create("Folder",{Name="Orbit_Stairwell_Preview",Parent=workspace}) S.previewRows={} S.previewRoutes={}
-				for i=S.last.floor,math.min(#path,S.last.floor+7) do S.prepareFloor(path[i],id,job,S.pose) end
+				for i=S.last.floor,math.min(#path,S.last.floor+7) do if not path[i].obsolete then S.prepareFloor(path[i],id,job,S.pose) end end
 				S.last.ready=true
+				if migrated and writefile then pcall(function() writefile("OrbitStairwellCheckpoint.before28.json",HttpService:JSONEncode(saved)) end) end
 				S.saveCheckpoint()
 				return string.format("Найдено %d этажей · продолжение с %d-го; похожие блоки сверены",#path,S.last.floor)
 			end)
@@ -7020,7 +7134,7 @@ trackConn(stairPreview.MouseButton1Click:Connect(function()
 	options.overlay=S.options.overlay S.generate(options) for key,f in pairs(stairFields) do f.Text=tostring(S.options[key]) end refreshOverlay()
 end))
 trackConn(stairRestore.MouseButton1Click:Connect(function() if StudioHooks.stairwell then StudioHooks.stairwell.restore() end end))
-trackConn(stairBuild.MouseButton1Click:Connect(function() if StudioHooks.stairwell then StudioHooks.stairwell.build() end end))
+trackConn(stairBuild.MouseButton1Click:Connect(function() if StudioHooks.stairwell then StudioHooks.stairwell.build(stairFields.floors.Text) end end))
 trackConn(stairCancel.MouseButton1Click:Connect(function() if StudioHooks.stairwell then StudioHooks.stairwell.cancel() end end))
 trackConn(stairRemove.MouseButton1Click:Connect(function() if StudioHooks.stairwell then StudioHooks.stairwell.removePreview() end end))
 trackConn(stairRegenerate.MouseButton1Click:Connect(function()
@@ -8115,4 +8229,4 @@ unloadScript = function()
 end
 
 _G.AUTOBUILD_UNLOAD = unloadScript
-setStatus("ORBIT stairwell-27: восстановление этажей и режим поверх совпадающих блоков")
+setStatus("ORBIT stairwell-28: продление конечной лестницы и закрытые стыки проходов")
