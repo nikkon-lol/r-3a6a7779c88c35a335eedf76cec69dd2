@@ -803,7 +803,7 @@ local function updateDefaultStats()
 end
 
 btnLog.MouseButton1Click:Connect(function()
-	local text="Autobuild Studio v5 / ORBIT · stairwell-28\n"..table.concat(diagnosticLog,"\n")
+	local text="Autobuild Studio v5 / ORBIT · stairwell-29\n"..table.concat(diagnosticLog,"\n")
 	if storageError then text=text.."\nStorage: "..storageError end
 	if copyText(text) then setStatus("Диагностика скопирована") else setStatus("Буфер обмена недоступен",true) end
 end)
@@ -5938,11 +5938,12 @@ StudioHooks.stairwell=(function()
 				frames[cursor]=frame
 			end
 			local accepted=false
-			while frame.next<=#frame.turns*4 do
+			while frame.next<=#frame.turns*8 do
 				local slot=frame.next frame.next+=1 attempts+=1
 				if cooperate and cooperate(cursor,attempts)==false then return nil,"Расчёт отменён" end
 				local config=table.clone(options) local variant=math.floor((slot-1)/#frame.turns)
-				config.noBranch=variant%2==1 config.noBends=variant>=2 config.noTemplates=variant>=2
+				config.noBranch=variant%2==1 config.noBends=variant==2 or variant==3 or variant==6 or variant==7
+				config.noTemplates=variant==2 or variant==3 or variant==4 or variant==5
 				local rise=math.clamp(options.rise+(((options.seed or 1)+cursor*31)%3-1)*4,12,24)
 				local candidate=S.module(frame.start,frame.heading,rise,cursor,frame.turns[(slot-1)%#frame.turns+1],config)
 				candidate.overlay=options.overlay==true
@@ -6087,9 +6088,20 @@ StudioHooks.stairwell=(function()
 		options.prior={} for i=math.max(1,#last.path-7),#last.path do options.prior[#options.prior+1]=last.path[i] end
 		local root=workspace:FindFirstChild("Bricks")
 		local query=function(focus) return root and StudioHooks.liveWorld.query(root,focus) or {} end
-		local path,message=S.layout(previous.nextOrigin,previous.nextDirection,options,query,function(level)
-			if cancelled() then return false end status("Следующая порция · этаж "..level.."/"..totalLabel(last)) task.wait() return not cancelled()
-		end)
+		local path,message
+		if config.floors==0 then
+			for _,window in ipairs({8,4,2,1}) do
+				options.endLevel=options.startLevel+window-1
+				path,message=S.layout(previous.nextOrigin,previous.nextDirection,options,query,function(level)
+					if cancelled() then return false end status("Ищу путь · этаж "..level.." · окно "..window) task.wait() return not cancelled()
+				end)
+				if path or cancelled() then break end
+			end
+		else
+			path,message=S.layout(previous.nextOrigin,previous.nextDirection,options,query,function(level)
+				if cancelled() then return false end status("Следующая порция · этаж "..level.."/"..totalLabel(last)) task.wait() return not cancelled()
+			end)
+		end
 		if not path then return nil,message end
 		for _,floor in ipairs(path) do last.path[#last.path+1]=floor last.count+=#floor.rows end
 		for _,floor in ipairs(path) do S.prepareFloor(floor,last.id,S.job,S.pose) end
@@ -6269,6 +6281,17 @@ StudioHooks.stairwell=(function()
 							for i,data in ipairs(session.blocks) do
 								if not matchesAll(data.placedBrick,data) then session.done[i]=nil return false,"Деталь "..i.." изменилась · восстанавливаю перед переходом" end
 							end
+							-- Confirm the actual world after replication has settled, not just references held by the session.
+							task.wait(math.max(.1,roundTripPing()*1.2))
+							local complete,matched=S.auditFloor(floor,true)
+							if not complete then
+								StudioHooks.liveWorld.close()
+								complete,matched=S.auditFloor(floor,true)
+							end
+							if not complete then
+								S.matchSession(floor)
+								return false,string.format("В мире найдено %d/%d блоков · достраиваю пропуски",matched,#floor.rows)
+							end
 						end
 						return finished,err
 					end
@@ -6331,7 +6354,7 @@ StudioHooks.stairwell=(function()
 		local last=S.last if not last or not last.config or not S.pose or not writefile or not HttpService.JSONEncode then return false end
 		local record={version=27,userId=LocalPlayer.UserId,placeId=game.PlaceId,config=last.config,pose={origin=coords(S.pose.origin),heading=coords(S.pose.heading)},id=last.id,floor=last.floor,path={}}
 		for _,f in ipairs(last.path) do
-			if f.rows then f.savedHash=S.floorHash(f) end
+			if f.rows then f.savedHash=S.floorHash(f) f.savedCount=#f.rows end
 			record.path[#record.path+1]={level=f.level,origin=coords(f.origin),direction=coords(f.direction),recipe=f.recipe,hash=f.savedHash,count=f.savedCount or f.rows and #f.rows,complete=f.complete==true,obsolete=f.obsolete}
 		end
 		local ok=pcall(function() writefile(checkpointFile,HttpService:JSONEncode(record)) end)
@@ -6414,12 +6437,12 @@ StudioHooks.stairwell=(function()
 		end
 		return matched,borrowed
 	end
-	function S.auditFloor(floor)
+	function S.auditFloor(floor,includeHazards)
 		local root=workspace:FindFirstChild("Bricks") if not root then return false,0 end
 		local matched=0
 		for i,row in ipairs(floor.rows) do
 			local found=false
-			if not row.hazard then for _,part in ipairs(StudioHooks.liveWorld.query(root,row)) do
+			if includeHazards or not row.hazard then for _,part in ipairs(StudioHooks.liveWorld.query(root,row)) do
 				if S.matchWorld(row,part) and exactRow(row,part) then found=true break end
 			end end
 			if found then matched+=1 end
@@ -6445,6 +6468,7 @@ StudioHooks.stairwell=(function()
 				local path,count={},0 local firstIncomplete local migrated=false
 				for index,record in ipairs(saved.path) do
 					if unloaded or job~=S.job then return end
+					if record.count==nil then migrated=true end
 					local o,d=vector(record.origin),vector(record.direction) local recipe=record.recipe
 					if not o or not d or type(recipe)~="table" or record.level~=index then error("Неверная запись этажа "..index,0) end
 					local opts=table.clone(config) opts.noBranch=recipe.noBranch opts.noBends=recipe.noBends opts.noTemplates=recipe.noTemplates opts.legacyPort=recipe.legacyPort
@@ -6453,11 +6477,11 @@ StudioHooks.stairwell=(function()
 					if f.savedHash~=record.hash and recipe.legacyPort==nil then
 						opts.legacyPort=true
 						local legacy=S.module(o,d,recipe.rise,index,recipe.turn,opts)
-						if S.floorHash(legacy)==record.hash and #legacy.rows==record.count then
+						if S.floorHash(legacy)==record.hash and (record.count==nil or #legacy.rows==record.count) then
 							migrated=true floorMigrated=true
 						end
 					end
-					if (not floorMigrated and (f.savedHash~=record.hash or f.savedCount~=record.count)) or not S.validateShell(f) then error("Геометрия этажа "..index.." изменилась после обновления; старый файл сохранён",0) end
+					if (not floorMigrated and (f.savedHash~=record.hash or record.count~=nil and f.savedCount~=record.count)) or not S.validateShell(f) then error("Геометрия этажа "..index.." изменилась после обновления; старый файл сохранён",0) end
 					if index>1 and (path[index-1].nextOrigin-o).Magnitude>.01 then error("Маршрут контрольной точки разорван",0) end
 					local complete,matched=S.auditFloor(f) f.complete=complete f.matched=matched
 					if not complete and not firstIncomplete then firstIncomplete=index end
@@ -8229,4 +8253,4 @@ unloadScript = function()
 end
 
 _G.AUTOBUILD_UNLOAD = unloadScript
-setStatus("ORBIT stairwell-28: продление конечной лестницы и закрытые стыки проходов")
+setStatus("ORBIT stairwell-29: seed 67, восстановление контрольной точки и проверка дыр")
