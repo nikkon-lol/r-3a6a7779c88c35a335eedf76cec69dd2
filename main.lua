@@ -803,7 +803,7 @@ local function updateDefaultStats()
 end
 
 btnLog.MouseButton1Click:Connect(function()
-	local text="Autobuild Studio v5 / ORBIT · stairwell-32\n"..table.concat(diagnosticLog,"\n")
+	local text="Autobuild Studio v5 / ORBIT · stairwell-33\n"..table.concat(diagnosticLog,"\n")
 	if storageError then text=text.."\nStorage: "..storageError end
 	if copyText(text) then setStatus("Диагностика скопирована") else setStatus("Буфер обмена недоступен",true) end
 end)
@@ -5270,7 +5270,7 @@ end)()
 
 -- Bounded layout search, once before building. Never picks up or removes world parts.
 StudioHooks.stairwell=(function()
-	local S={busy=false,job=0,message="Открытый вход у ног · подъём в темноту",options={floors=6,rise=16,seed=math.random(1,1000000),overlay=false,poolVersion=2},metadata={}}
+	local S={busy=false,job=0,message="Открытый вход у ног · подъём в темноту",options={floors=6,rise=16,seed=math.random(1,1000000),overlay=false,poolVersion=2,rarityVersion=33},metadata={}}
 	local function status(message,failure)
 		S.message=message if StudioHooks.stairStatus then StudioHooks.stairStatus(message) end setStatus(message,failure)
 	end
@@ -5279,7 +5279,7 @@ StudioHooks.stairwell=(function()
 		local floors=(value=="∞" or value=="inf" or value=="бесконечно") and 0 or tonumber(value)
 		local rise,seed=tonumber(options.rise),tonumber(options.seed) or S.options.seed or 1
 		if not floors or floors~=floors or floors==math.huge or floors<0 or not rise or rise~=rise or rise==math.huge or seed~=seed or seed==math.huge then return nil,"Уровни: число или 0 / ∞; перепад: число" end
-		local result={floors=math.max(0,math.round(floors)),rise=math.clamp(math.round(rise/4)*4,8,40),seed=math.clamp(math.round(seed),1,1000000000),overlay=options.overlay==true or options.overlay=="true",poolVersion=options.poolVersion==1 and 1 or 2}
+		local result={floors=math.max(0,math.round(floors)),rise=math.clamp(math.round(rise/4)*4,8,40),seed=math.clamp(math.round(seed),1,1000000000),overlay=options.overlay==true or options.overlay=="true",poolVersion=options.poolVersion==1 and 1 or 2,rarityVersion=options.rarityVersion==32 and 32 or 33}
 		S.options=result
 		return result
 	end
@@ -5816,12 +5816,15 @@ StudioHooks.stairwell=(function()
 		end
 		return entrances,exits
 	end
-	function S.pickTemplate(seed,level,poolVersion)
-		-- Existing rooms retain half the pool. The two special rooms have 80% weight.
-		local total=4.4 for _,t in ipairs(S.templates) do if t.name~="square" and (poolVersion==2 or not t.soil) then total+=t.weight end end
+	function S.pickTemplate(seed,level,poolVersion,rarityVersion)
+		-- Version 33 only changes future rooms. Saved version 32 recipes keep their old selection.
+		local function weight(t)
+			return t.name=="three-exits" and rarityVersion==33 and .2 or t.weight
+		end
+		local total=4.4 for _,t in ipairs(S.templates) do if t.name~="square" and (poolVersion==2 or not t.soil) then total+=weight(t) end end
 		local n=randomUnit(seed,level,731)*total
 		if n<4.4 then return nil end n-=4.4
-		for _,t in ipairs(S.templates) do if t.name~="square" and (poolVersion==2 or not t.soil) then n-=t.weight if n<0 then return t end end end
+		for _,t in ipairs(S.templates) do if t.name~="square" and (poolVersion==2 or not t.soil) then n-=weight(t) if n<0 then return t end end end
 		return nil
 	end
 	function S.templateModule(template,origin,direction,drop,level,turn,options)
@@ -5929,7 +5932,7 @@ StudioHooks.stairwell=(function()
 			if options.connector then return S.routeModule(origin,direction,drop,level,turn,options) end
 			if level%50==0 and not options.noMilestone then return S.milestoneModule(origin,direction,drop,level,turn,options) end
 		end
-		local template=level>1 and not options.noTemplates and (options.templateName and (function() for _,t in ipairs(S.templates) do if t.name==options.templateName then return t end end end)() or S.pickTemplate(options.seed or 1,level,options.poolVersion))
+		local template=level>1 and not options.noTemplates and (options.templateName and (function() for _,t in ipairs(S.templates) do if t.name==options.templateName then return t end end end)() or S.pickTemplate(options.seed or 1,level,options.poolVersion,options.rarityVersion))
 		local floor=template and S.templateModule(template,origin,direction,drop,level,turn,options) or originalModule(origin,direction,drop,level,turn,options)
 		floor.direction=direction floor.poolVersion=options.poolVersion
 		return S.applyWallHazards(floor,options.seed or 1)
@@ -6163,7 +6166,7 @@ StudioHooks.stairwell=(function()
 				local rise=math.clamp(options.rise+(((options.seed or 1)+cursor*31)%3-1)*4,options.poolVersion==2 and 8 or 12,options.poolVersion==2 and 40 or 24)
 				local candidate=S.module(frame.start,frame.heading,rise,cursor,frame.turns[(slot-1)%#frame.turns+1],config)
 				candidate.overlay=options.overlay==true
-				candidate.recipe={rise=rise,turn=frame.turns[(slot-1)%#frame.turns+1],noBranch=config.noBranch,noBends=config.noBends,noTemplates=config.noTemplates,poolVersion=config.poolVersion==2 and 2 or nil,seed=config.poolVersion==2 and config.seed or nil,connector=config.connector,milestoneLength=config.milestoneLength,extraLandings=config.extraLandings}
+				candidate.recipe={rise=rise,turn=frame.turns[(slot-1)%#frame.turns+1],noBranch=config.noBranch,noBends=config.noBends,noTemplates=config.noTemplates,poolVersion=config.poolVersion==2 and 2 or nil,rarityVersion=config.rarityVersion,seed=config.poolVersion==2 and config.seed or nil,connector=config.connector,milestoneLength=config.milestoneLength,extraLandings=config.extraLandings}
 				local previous={}
 				for _,old in ipairs(options.prior or {}) do if old.rows and Planner.intersects(candidate.clearBounds,old.clearBounds) then previous[#previous+1]=old end end
 				for _,old in ipairs(path) do if Planner.intersects(candidate.clearBounds,old.clearBounds) then previous[#previous+1]=old end end
@@ -6299,7 +6302,7 @@ StudioHooks.stairwell=(function()
 		-- A paused extension can retain some prepared floors; finish those before appending.
 		for i=last.floor,#last.path do if not last.path[i].session or not last.path[i].session.plan then S.prepareFloor(last.path[i],last.id,S.job,S.pose) end end
 		local previous=last.path[#last.path]
-		local options=table.clone(config) options.startLevel=#last.path+1
+		local options=table.clone(config) options.poolVersion=2 options.rarityVersion=33 options.startLevel=#last.path+1
 		options.endLevel=config.floors==0 and options.startLevel+7 or math.min(config.floors,options.startLevel+7)
 		options.prior={} for i=math.max(1,#last.path-7),#last.path do options.prior[#options.prior+1]=last.path[i] end
 		local root=workspace:FindFirstChild("Bricks")
@@ -6331,6 +6334,7 @@ StudioHooks.stairwell=(function()
 		if unloaded or _G.autobuildRunning or busySaving or StudioHooks.extras and (StudioHooks.extras.busy or StudioHooks.extras.running) then status("Сначала останови текущую работу",true) return false end
 		if pending() then status("Есть ожидающий запрос · продолжи текущий этаж перед новой генерацией",true) return false end
 		local config,err=S.configure(options or S.options) if not config then status(err,true) return false end
+		config.rarityVersion=33 S.options.rarityVersion=33
 		discard() S.job+=1 local job=S.job S.busy=true S.blueprints={}
 		task.spawn(function()
 			local ok,result=pcall(function()
@@ -6677,7 +6681,7 @@ StudioHooks.stairwell=(function()
 				if type(saved)~="table" or saved.version~=27 or saved.userId~=LocalPlayer.UserId or saved.placeId~=game.PlaceId or type(saved.path)~="table" or #saved.path==0 then error("Контрольная точка повреждена или относится к другой игре",0) end
 				local origin,heading=vector(saved.pose and saved.pose.origin),vector(saved.pose and saved.pose.heading)
 				if not origin or not heading then error("В контрольной точке нет места начала",0) end
-				local savedConfig=table.clone(saved.config) savedConfig.poolVersion=savedConfig.poolVersion or 1
+				local savedConfig=table.clone(saved.config) savedConfig.poolVersion=savedConfig.poolVersion or 1 savedConfig.rarityVersion=savedConfig.rarityVersion or 32
 				local config,err=S.configure(savedConfig) if not config then error(err,0) end
 				S.removePreview() discard() S.pose={origin=origin,heading=heading} S.blueprints={}
 				local root=workspace:FindFirstChild("Bricks")
@@ -6689,7 +6693,7 @@ StudioHooks.stairwell=(function()
 					if record.count==nil then migrated=true end
 					local o,d=vector(record.origin),vector(record.direction) local recipe=record.recipe
 					if not o or not d or type(recipe)~="table" or record.level~=index then error("Неверная запись этажа "..index,0) end
-					local opts=table.clone(config) opts.noBranch=recipe.noBranch opts.noBends=recipe.noBends opts.noTemplates=recipe.noTemplates opts.legacyPort=recipe.legacyPort opts.poolVersion=recipe.poolVersion or 1 opts.seed=recipe.seed or config.seed opts.connector=recipe.connector opts.milestoneLength=recipe.milestoneLength opts.extraLandings=recipe.extraLandings
+					local opts=table.clone(config) opts.noBranch=recipe.noBranch opts.noBends=recipe.noBends opts.noTemplates=recipe.noTemplates opts.legacyPort=recipe.legacyPort opts.poolVersion=recipe.poolVersion or 1 opts.rarityVersion=recipe.rarityVersion or 32 opts.seed=recipe.seed or config.seed opts.connector=recipe.connector opts.milestoneLength=recipe.milestoneLength opts.extraLandings=recipe.extraLandings
 					local f=S.module(o,d,recipe.rise,index,recipe.turn,opts) local floorMigrated=false
 					f.recipe=recipe f.overlay=config.overlay f.savedHash=S.floorHash(f) f.savedCount=#f.rows f.obsolete=record.obsolete
 					if f.savedHash~=record.hash and recipe.legacyPort==nil then
@@ -8480,4 +8484,4 @@ unloadScript = function()
 end
 
 _G.AUTOBUILD_UNLOAD = unloadScript
-setStatus("ORBIT stairwell-32: адаптивные маршруты, комнаты soil и checkpoint seed 67")
+setStatus("ORBIT stairwell-33: редкая комната со столбом и совместимые контрольные точки")
