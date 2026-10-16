@@ -803,7 +803,7 @@ local function updateDefaultStats()
 end
 
 btnLog.MouseButton1Click:Connect(function()
-	local text="Autobuild Studio v5 / ORBIT · stairwell-33\n"..table.concat(diagnosticLog,"\n")
+	local text="Autobuild Studio v5 / ORBIT · stairwell-34\n"..table.concat(diagnosticLog,"\n")
 	if storageError then text=text.."\nStorage: "..storageError end
 	if copyText(text) then setStatus("Диагностика скопирована") else setStatus("Буфер обмена недоступен",true) end
 end)
@@ -4674,7 +4674,11 @@ local function runBuilderEngine(buildString,offset,prepareOnly)
 	local skipped=0
 	for _,data in ipairs(session.blocks) do if data.skipped then skipped+=1 end end
 	if _G.autobuildPlaced<#session.blocks then
-		if session.transient then return false,string.format("Подтверждено %d/%d · ожидаю автоматическую сверку текущего этажа",_G.autobuildPlaced,#session.blocks) end
+		if session.transient then
+			local details={}
+			for i,data in ipairs(session.blocks) do if not session.done[i] and #details<3 then details[#details+1]="#"..i..": "..tostring(data.failure or data.creation and "ожидаю Build" or "сверяю мир") end end
+			return false,string.format("Подтверждено %d/%d · %s",_G.autobuildPlaced,#session.blocks,table.concat(details,"; "))
+		end
 		return false,string.format("Обход завершён: готово %d/%d · пропущено %d · ожидают восстановления %d. Продолжить / переделать проблемный блок.",_G.autobuildPlaced,#session.blocks,skipped,#session.blocks-_G.autobuildPlaced-skipped)
 	end
 	if StudioHooks.stairwell and StudioHooks.guard.preserve(session) then local ok,err=StudioHooks.stairwell.activatePits(session) if not ok then return false,err end end
@@ -5270,7 +5274,7 @@ end)()
 
 -- Bounded layout search, once before building. Never picks up or removes world parts.
 StudioHooks.stairwell=(function()
-	local S={busy=false,job=0,message="Открытый вход у ног · подъём в темноту",options={floors=6,rise=16,seed=math.random(1,1000000),overlay=false,poolVersion=2,rarityVersion=33},metadata={}}
+	local S={busy=false,job=0,message="Открытый вход у ног · подъём в темноту",options={floors=6,rise=16,seed=math.random(1,1000000),overlay=false,poolVersion=2,rarityVersion=33,fixtureVersion=34},metadata={}}
 	local function status(message,failure)
 		S.message=message if StudioHooks.stairStatus then StudioHooks.stairStatus(message) end setStatus(message,failure)
 	end
@@ -5279,7 +5283,7 @@ StudioHooks.stairwell=(function()
 		local floors=(value=="∞" or value=="inf" or value=="бесконечно") and 0 or tonumber(value)
 		local rise,seed=tonumber(options.rise),tonumber(options.seed) or S.options.seed or 1
 		if not floors or floors~=floors or floors==math.huge or floors<0 or not rise or rise~=rise or rise==math.huge or seed~=seed or seed==math.huge then return nil,"Уровни: число или 0 / ∞; перепад: число" end
-		local result={floors=math.max(0,math.round(floors)),rise=math.clamp(math.round(rise/4)*4,8,40),seed=math.clamp(math.round(seed),1,1000000000),overlay=options.overlay==true or options.overlay=="true",poolVersion=options.poolVersion==1 and 1 or 2,rarityVersion=options.rarityVersion==32 and 32 or 33}
+		local result={floors=math.max(0,math.round(floors)),rise=math.clamp(math.round(rise/4)*4,8,40),seed=math.clamp(math.round(seed),1,1000000000),overlay=options.overlay==true or options.overlay=="true",poolVersion=options.poolVersion==1 and 1 or 2,rarityVersion=options.rarityVersion==32 and 32 or 33,fixtureVersion=options.fixtureVersion==33 and 33 or 34}
 		S.options=result
 		return result
 	end
@@ -5849,7 +5853,8 @@ StudioHooks.stairwell=(function()
 		for _,r in ipairs(template.rows) do if r[7]~="light" or level<=50 then
 			local size=Vector3.new(r[4],r[5],r[6])
 			if math.abs(direction.X*localDirection.Z-direction.Z*localDirection.X)>.5 then size=Vector3.new(size.Z,size.Y,size.X) end
-			rows[#rows+1]={pos=transform({r[1],r[2],r[3]}),size=size,color=r[7]=="light" and S.lightColor(level) or r[7]=="glass" and Color3.fromRGB(128,128,128) or color,material=r[7]=="light" and Enum.Material.Neon or r[7]=="glass" and Enum.Material.Glass or Enum.Material.Brick,level=level,isWall=r[7]=="wall",role=r[7]}
+			local lightClearance=template.soil and r[7]=="light" and options.fixtureVersion==34 and 1 or 0
+			rows[#rows+1]={pos=transform({r[1],r[2]-lightClearance,r[3]}),size=size,color=r[7]=="light" and S.lightColor(level) or r[7]=="glass" and Color3.fromRGB(128,128,128) or color,material=r[7]=="light" and Enum.Material.Neon or r[7]=="glass" and Enum.Material.Glass or Enum.Material.Brick,level=level,isWall=r[7]=="wall",role=r[7]}
 		end end
 		local function volume(lo,hi,o,h)
 			local s=Vector3.new(h.Z,0,-h.X) local p=(lo+hi)/2 local size=hi-lo
@@ -6166,7 +6171,7 @@ StudioHooks.stairwell=(function()
 				local rise=math.clamp(options.rise+(((options.seed or 1)+cursor*31)%3-1)*4,options.poolVersion==2 and 8 or 12,options.poolVersion==2 and 40 or 24)
 				local candidate=S.module(frame.start,frame.heading,rise,cursor,frame.turns[(slot-1)%#frame.turns+1],config)
 				candidate.overlay=options.overlay==true
-				candidate.recipe={rise=rise,turn=frame.turns[(slot-1)%#frame.turns+1],noBranch=config.noBranch,noBends=config.noBends,noTemplates=config.noTemplates,poolVersion=config.poolVersion==2 and 2 or nil,rarityVersion=config.rarityVersion,seed=config.poolVersion==2 and config.seed or nil,connector=config.connector,milestoneLength=config.milestoneLength,extraLandings=config.extraLandings}
+				candidate.recipe={rise=rise,turn=frame.turns[(slot-1)%#frame.turns+1],noBranch=config.noBranch,noBends=config.noBends,noTemplates=config.noTemplates,poolVersion=config.poolVersion==2 and 2 or nil,rarityVersion=config.rarityVersion,fixtureVersion=config.fixtureVersion,seed=config.poolVersion==2 and config.seed or nil,connector=config.connector,milestoneLength=config.milestoneLength,extraLandings=config.extraLandings}
 				local previous={}
 				for _,old in ipairs(options.prior or {}) do if old.rows and Planner.intersects(candidate.clearBounds,old.clearBounds) then previous[#previous+1]=old end end
 				for _,old in ipairs(path) do if Planner.intersects(candidate.clearBounds,old.clearBounds) then previous[#previous+1]=old end end
@@ -6302,7 +6307,7 @@ StudioHooks.stairwell=(function()
 		-- A paused extension can retain some prepared floors; finish those before appending.
 		for i=last.floor,#last.path do if not last.path[i].session or not last.path[i].session.plan then S.prepareFloor(last.path[i],last.id,S.job,S.pose) end end
 		local previous=last.path[#last.path]
-		local options=table.clone(config) options.poolVersion=2 options.rarityVersion=33 options.startLevel=#last.path+1
+		local options=table.clone(config) options.poolVersion=2 options.rarityVersion=33 options.fixtureVersion=34 options.startLevel=#last.path+1
 		options.endLevel=config.floors==0 and options.startLevel+7 or math.min(config.floors,options.startLevel+7)
 		options.prior={} for i=math.max(1,#last.path-7),#last.path do options.prior[#options.prior+1]=last.path[i] end
 		local root=workspace:FindFirstChild("Bricks")
@@ -6334,7 +6339,7 @@ StudioHooks.stairwell=(function()
 		if unloaded or _G.autobuildRunning or busySaving or StudioHooks.extras and (StudioHooks.extras.busy or StudioHooks.extras.running) then status("Сначала останови текущую работу",true) return false end
 		if pending() then status("Есть ожидающий запрос · продолжи текущий этаж перед новой генерацией",true) return false end
 		local config,err=S.configure(options or S.options) if not config then status(err,true) return false end
-		config.rarityVersion=33 S.options.rarityVersion=33
+		config.rarityVersion=33 config.fixtureVersion=34 S.options.rarityVersion=33 S.options.fixtureVersion=34
 		discard() S.job+=1 local job=S.job S.busy=true S.blueprints={}
 		task.spawn(function()
 			local ok,result=pcall(function()
@@ -6677,23 +6682,24 @@ StudioHooks.stairwell=(function()
 		S.job+=1 local job=S.job S.busy=true
 		task.spawn(function()
 			local ok,message=pcall(function()
-				local saved=HttpService:JSONDecode(readfile(checkpointFile))
+				local originalCheckpointText=readfile(checkpointFile)
+				local saved=HttpService:JSONDecode(originalCheckpointText)
 				if type(saved)~="table" or saved.version~=27 or saved.userId~=LocalPlayer.UserId or saved.placeId~=game.PlaceId or type(saved.path)~="table" or #saved.path==0 then error("Контрольная точка повреждена или относится к другой игре",0) end
 				local origin,heading=vector(saved.pose and saved.pose.origin),vector(saved.pose and saved.pose.heading)
 				if not origin or not heading then error("В контрольной точке нет места начала",0) end
-				local savedConfig=table.clone(saved.config) savedConfig.poolVersion=savedConfig.poolVersion or 1 savedConfig.rarityVersion=savedConfig.rarityVersion or 32
+				local savedConfig=table.clone(saved.config) savedConfig.poolVersion=savedConfig.poolVersion or 1 savedConfig.rarityVersion=savedConfig.rarityVersion or 32 savedConfig.fixtureVersion=savedConfig.fixtureVersion or 33
 				local config,err=S.configure(savedConfig) if not config then error(err,0) end
 				S.removePreview() discard() S.pose={origin=origin,heading=heading} S.blueprints={}
 				local root=workspace:FindFirstChild("Bricks")
 				for _=1,80 do if root or unloaded or job~=S.job then break end task.wait(.1) root=workspace:FindFirstChild("Bricks") end
 				if not root then error("Мир блоков ещё не загрузился · нажми «Восстановить» снова",0) end
-				local path,count={},0 local firstIncomplete local migrated=false
+				local path,count={},0 local firstIncomplete local migrated=false local fixtureMigrated=false
 				for index,record in ipairs(saved.path) do
 					if unloaded or job~=S.job then return end
 					if record.count==nil then migrated=true end
 					local o,d=vector(record.origin),vector(record.direction) local recipe=record.recipe
 					if not o or not d or type(recipe)~="table" or record.level~=index then error("Неверная запись этажа "..index,0) end
-					local opts=table.clone(config) opts.noBranch=recipe.noBranch opts.noBends=recipe.noBends opts.noTemplates=recipe.noTemplates opts.legacyPort=recipe.legacyPort opts.poolVersion=recipe.poolVersion or 1 opts.rarityVersion=recipe.rarityVersion or 32 opts.seed=recipe.seed or config.seed opts.connector=recipe.connector opts.milestoneLength=recipe.milestoneLength opts.extraLandings=recipe.extraLandings
+					local opts=table.clone(config) opts.noBranch=recipe.noBranch opts.noBends=recipe.noBends opts.noTemplates=recipe.noTemplates opts.legacyPort=recipe.legacyPort opts.poolVersion=recipe.poolVersion or 1 opts.rarityVersion=recipe.rarityVersion or 32 opts.fixtureVersion=recipe.fixtureVersion or 33 opts.seed=recipe.seed or config.seed opts.connector=recipe.connector opts.milestoneLength=recipe.milestoneLength opts.extraLandings=recipe.extraLandings
 					local f=S.module(o,d,recipe.rise,index,recipe.turn,opts) local floorMigrated=false
 					f.recipe=recipe f.overlay=config.overlay f.savedHash=S.floorHash(f) f.savedCount=#f.rows f.obsolete=record.obsolete
 					if f.savedHash~=record.hash and recipe.legacyPort==nil then
@@ -6705,7 +6711,24 @@ StudioHooks.stairwell=(function()
 					end
 					if (not floorMigrated and (f.savedHash~=record.hash or record.count~=nil and f.savedCount~=record.count)) or not S.validateShell(f) then error("Геометрия этажа "..index.." изменилась после обновления; старый файл сохранён",0) end
 					if index>1 and (path[index-1].nextOrigin-o).Magnitude>.01 then error("Маршрут контрольной точки разорван",0) end
-					local complete,matched=S.auditFloor(f) f.complete=complete f.matched=matched
+					local complete,matched=S.auditFloor(f,true) f.complete=complete f.matched=matched
+					if not complete and opts.fixtureVersion~=34 and f.template and f.template.soil then
+						local oldLights=0 local placedLights=0
+						for _,row in ipairs(f.rows) do if row.role=="light" then
+							oldLights+=1
+							for _,part in ipairs(StudioHooks.liveWorld.query(root,row)) do
+								if part.Parent and (part.Position-row.pos).Magnitude<.05 and (part.Size-row.size).Magnitude<.05 then placedLights+=1 break end
+							end
+						end end
+						if oldLights>0 and placedLights==0 then
+							local revisedOptions=table.clone(opts) revisedOptions.fixtureVersion=34
+							local revised=S.module(o,d,recipe.rise,index,recipe.turn,revisedOptions)
+							if #revised.rows==#f.rows and revised.nextOrigin==f.nextOrigin and revised.nextDirection==f.nextDirection and S.validateShell(revised) then
+								recipe.fixtureVersion=34 revised.recipe=recipe revised.overlay=config.overlay revised.savedHash=S.floorHash(revised) revised.savedCount=#revised.rows revised.obsolete=record.obsolete
+								f=revised complete,matched=S.auditFloor(f,true) f.complete=complete f.matched=matched fixtureMigrated=true
+							end
+						end
+					end
 					if not complete and not firstIncomplete then firstIncomplete=index end
 					path[index]=f count+=#f.rows
 					status(string.format("Восстановление · этаж %d/%d · найдено %d/%d",index,#saved.path,matched,#f.rows)) task.wait()
@@ -6718,6 +6741,7 @@ StudioHooks.stairwell=(function()
 				for i=S.last.floor,math.min(#path,S.last.floor+7) do if not path[i].obsolete then S.prepareFloor(path[i],id,job,S.pose) end end
 				S.last.ready=true
 				if migrated and writefile then pcall(function() writefile("OrbitStairwellCheckpoint.before28.json",HttpService:JSONEncode(saved)) end) end
+				if fixtureMigrated and writefile then pcall(function() if not isfile or not isfile("OrbitStairwellCheckpoint.before34.json") then writefile("OrbitStairwellCheckpoint.before34.json",originalCheckpointText) end end) end
 				S.saveCheckpoint()
 				return string.format("Найдено %d этажей · продолжение с %d-го; похожие блоки сверены",#path,S.last.floor)
 			end)
@@ -8484,4 +8508,4 @@ unloadScript = function()
 end
 
 _G.AUTOBUILD_UNLOAD = unloadScript
-setStatus("ORBIT stairwell-33: редкая комната со столбом и совместимые контрольные точки")
+setStatus("ORBIT stairwell-34: светильники с зазором и восстановление сида 30")
