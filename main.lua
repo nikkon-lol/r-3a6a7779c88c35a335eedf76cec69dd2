@@ -803,7 +803,7 @@ local function updateDefaultStats()
 end
 
 btnLog.MouseButton1Click:Connect(function()
-	local text="Autobuild Studio v5 / ORBIT · stairwell-30\n"..table.concat(diagnosticLog,"\n")
+	local text="Autobuild Studio v5 / ORBIT · stairwell-31\n"..table.concat(diagnosticLog,"\n")
 	if storageError then text=text.."\nStorage: "..storageError end
 	if copyText(text) then setStatus("Диагностика скопирована") else setStatus("Буфер обмена недоступен",true) end
 end)
@@ -5909,7 +5909,7 @@ StudioHooks.stairwell=(function()
 		return true
 	end
 
-	local function clear(candidate,previous,obstacles)
+	local function clear(candidate,previous,obstacles,priorLights)
 		local solids,passages,world={},{},{}
 		local own=Planner.spatial(candidate.rows)
 		if not S.validateShell(candidate,own) then return false end
@@ -5926,7 +5926,23 @@ StudioHooks.stairwell=(function()
 				for _,row in ipairs(candidate.rows) do if S.matchWorld(row,part) then recognized[part]=true break end end
 			end end
 		end
-		for _,part in ipairs(obstacles) do if part.Parent and not recognized[part] then local r=StudioHooks.guard.worldBox(part) r.instance=part world[#world+1]=r end end
+		local priorIndex=Planner.spatial(solids)
+		for _,part in ipairs(obstacles) do if part.Parent and not recognized[part] then
+			local r=StudioHooks.guard.worldBox(part) local priorPart=false
+			-- The prior floor is already checked through its planned solids/routes.
+			-- Treating those same owned bricks as foreign world obstacles closes
+			-- the entrance of every candidate after an extension window.
+			if S.matchWorld then for _,old in ipairs(priorIndex:query(r)) do
+				if S.matchWorld(old,part)=="owned" then priorPart=true break end
+			end end
+			-- A 1-stud ceiling light from the preceding floor can enter the
+			-- eight-stud planning clearance without blocking a character. Only
+			-- ignore it when it is the exact owned fixture from a saved floor.
+			if not priorPart and priorLights and S.matchWorld and r.size.X<=1.01 and r.size.Y<=1.01 and r.size.Z<=1.01 then
+				for _,old in ipairs(priorLights:query(r)) do if S.matchWorld(old,part)=="owned" then priorPart=true break end end
+			end
+			if not priorPart then r.instance=part world[#world+1]=r end
+		end end
 		local solidIndex,routeIndex,worldIndex=Planner.spatial(solids),Planner.spatial(passages),Planner.spatial(world)
 		for _,r in ipairs(candidate.rows) do
 			for _,v in ipairs(worldIndex:query(r)) do if v.instance.Parent and StudioHooks.guard.intersects(v.instance,r) then return false end end
@@ -5946,6 +5962,11 @@ StudioHooks.stairwell=(function()
 	function S.layout(origin,direction,options,query,cooperate)
 		local first=options.startLevel or 1
 		local last=options.endLevel or (options.floors==0 and first+7 or options.floors)
+		local fixtureRows={}
+		for _,old in ipairs(options.prior or {}) do for _,row in ipairs(old.rows or {}) do
+			if row.material==Enum.Material.Neon and row.size.X<=1.01 and row.size.Y<=1.01 and row.size.Z<=1.01 then fixtureRows[#fixtureRows+1]=row end
+		end end
+		local priorLights=#fixtureRows>0 and Planner.spatial(fixtureRows) or nil
 		local path,frames={},{} local cursor=first local attempts=0 local backtracks=0
 		while cursor<=last do
 			local frame=frames[cursor]
@@ -5971,7 +5992,7 @@ StudioHooks.stairwell=(function()
 				for _,old in ipairs(options.prior or {}) do if old.rows and Planner.intersects(candidate.clearBounds,old.clearBounds) then previous[#previous+1]=old end end
 				for _,old in ipairs(path) do if Planner.intersects(candidate.clearBounds,old.clearBounds) then previous[#previous+1]=old end end
 				local focus=StudioHooks.liveWorld.focus(candidate.bounds,bounds(candidate.routes))
-				if clear(candidate,previous,query(focus)) then path[#path+1]=candidate cursor+=1 accepted=true break end
+				if clear(candidate,previous,query(focus),priorLights) then path[#path+1]=candidate cursor+=1 accepted=true break end
 			end
 			if not accepted then
 				frames[cursor]=nil backtracks+=1
@@ -8273,4 +8294,4 @@ unloadScript = function()
 end
 
 _G.AUTOBUILD_UNLOAD = unloadScript
-setStatus("ORBIT stairwell-30: toxic без повторной покраски, восстановление этажа")
+setStatus("ORBIT stairwell-31: продолжение seed 67 после этажа 22")
